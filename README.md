@@ -18,7 +18,7 @@ audit APIs are intentionally out of scope and will be added in later features.
 - Environment-specific settings: `development`, `production`, `test`.
 - OpenAPI schema and Swagger/ReDoc documentation.
 - Central versioned API routing through `config/api_urls.py` and the
-  `API_PREFIX` setting (currently `api/v1`).
+  `API_PREFIX` setting (currently `/api/v1`).
 - Console and rotating-file structured logging with request correlation IDs.
 - Liveness and readiness health endpoints.
 - Exchange and instrument master-data models, with database constraints.
@@ -109,12 +109,56 @@ audit APIs are intentionally out of scope and will be added in later features.
 
 ## Docker Compose
 
-```powershell
-docker compose build
-docker compose up -d db redis
-docker compose run --rm web python manage.py migrate
-docker compose up
-```
+The following setup uses WSL Bash and keeps the environment file outside the
+repository. Run commands from the repository root.
+
+1. Set the env file location and create its parent directory:
+
+   ```bash
+   env_dir="$HOME/.config/env_vars"
+   env_file="$env_dir/your-desired-name.env"
+   mkdir -p "$env_dir"
+   ```
+
+2. For a new setup, copy the sample file. If you already have a project `.env`,
+   move it instead. Choose one command:
+
+   ```bash
+   cp .env.example "$env_file"
+   # Or, if an existing .env contains your local configuration:
+   # mv .env "$env_file"
+   ```
+
+   Restrict access and edit the file. Generate fresh local secrets before use
+   if the sample values are present. Set `TIME_ZONE=Asia/Kolkata` for GMT+05:30.
+
+   ```bash
+   chmod 600 "$env_file"
+   nano "$env_file"
+   ```
+
+3. Install the global WSL Bash shortcuts. The script detects the repository
+   location from its own path and saves the selected env file location:
+
+   ```bash
+   bash scripts/install_dev_commands.sh "$env_file"
+   source "$HOME/.bashrc"
+   ```
+
+4. Build and start the services, then apply migrations:
+
+   ```bash
+   dev_up --build
+   project_dir="$PWD"
+   docker compose --project-directory "$project_dir" \
+     --env-file "$env_file" \
+     -f "$project_dir/docker-compose.yml" exec web python manage.py migrate
+   ```
+
+After setup, `dev_up`, `dev_down` and `dev_restart` work from any new WSL Bash
+terminal. They accept optional service names, for example `dev_restart web`.
+The commands use Docker Compose's `--env-file` option, since Compose does not
+automatically read the `MDA_ENV_FILE` variable used by Django's local settings.
 
 This starts:
 
@@ -124,8 +168,8 @@ This starts:
 - Celery worker.
 - Celery Beat.
 
-Docker Compose reads variables from `.env` and substitutes `${VARIABLE}`
-expressions in `docker-compose.yml`. The Compose-specific variables in `.env`
+Docker Compose reads variables from the configured env file and substitutes
+`${VARIABLE}` expressions in `docker-compose.yml`. The Compose-specific values
 set container hostnames, ports, paths and Redis URLs; the regular `DB_HOST`,
 `DB_PORT`, `CACHE_URL` and Celery URLs remain for commands run directly on your
 host. MySQL uses the non-root `DB_USER` account for Django, with
@@ -133,11 +177,11 @@ host. MySQL uses the non-root `DB_USER` account for Django, with
 
 Compose requires the database credentials, Django secret and allowed hosts,
 `MYSQL_HOST_PORT`, `REDIS_HOST_PORT`, `REDIS_IMAGE`, `WEB_HOST_PORT`, `COMPOSE_DB_HOST`,
-`COMPOSE_DB_PORT`, the three `COMPOSE_*` Redis URLs, and the Compose log and
-ingestion paths. It stops with a clear error if a required value is missing.
-
-The first command builds the app image. The next two start the dependencies and
-apply database migrations before the API, worker and beat services start.
+`COMPOSE_DB_PORT`, the three `COMPOSE_*` Redis URLs, and the Compose ingestion
+path. The web, worker and beat containers write logs to `/var/log/mda/app.log`
+in the persistent `mda_logs` Docker volume. View the web container log with
+`docker compose exec web tail -f /var/log/mda/app.log`. It stops with a clear
+error if a required value is missing.
 
 ## Health endpoints
 
@@ -228,7 +272,7 @@ rotation size and backup count are environment-driven:
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `LOG_LEVEL` | Root log level | `INFO` |
-| `LOG_FILE_PATH` | Rotating log file path | `logs/app.log` |
+| `LOG_FILE_PATH` | Rotating log file path | `/var/log/mda/app.log` |
 | `LOG_MAX_BYTES` | Maximum size of one log file | `10485760` |
 | `LOG_BACKUP_COUNT` | Number of rotated files retained | `5` |
 

@@ -239,7 +239,7 @@ CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 # ---------------------------------------------------------------------------
 
 LOG_LEVEL = env_str("LOG_LEVEL", "INFO").upper()
-LOG_FILE_PATH = str(resolve_path(env_str("LOG_FILE_PATH", "logs/app.log")))
+LOG_FILE_PATH = str(resolve_path(env_str("LOG_FILE_PATH", "/var/log/mda/app.log")))
 LOG_MAX_BYTES = env_int("LOG_MAX_BYTES", 10 * 1024 * 1024)
 LOG_BACKUP_COUNT = env_int("LOG_BACKUP_COUNT", 5)
 

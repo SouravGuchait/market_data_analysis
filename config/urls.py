@@ -1,7 +1,7 @@
 """Project URL configuration."""
 
 from __future__ import annotations
-
+from django.http import HttpResponse
 from django.conf import settings
 from django.contrib import admin
 from django.urls import include, path
@@ -17,4 +17,5 @@ urlpatterns = [
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/docs/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),
     path(prefix + "health/", include("apps.common.urls"), name="health"),
+    path('health', lambda request: HttpResponse("OK", content_type="text/plain")),
 ]
