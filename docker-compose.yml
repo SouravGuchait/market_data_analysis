@@ -1,0 +1,117 @@
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+00:00
+    environment:
+      MYSQL_DATABASE: ${DB_NAME:?Set DB_NAME in .env}
+      MYSQL_USER: ${DB_USER:?Set DB_USER in .env}
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Set DB_ROOT_PASSWORD in .env}
+    ports:
+      - "${MYSQL_HOST_PORT:?Set MYSQL_HOST_PORT in .env}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: ${REDIS_IMAGE:?Set REDIS_IMAGE in .env}
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_HOST_PORT:?Set REDIS_HOST_PORT in .env}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build:
+      context: .
+    command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+    environment: &django_environment
+      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:?Set DJANGO_SETTINGS_MODULE in .env}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:?Set DJANGO_DEBUG in .env}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?Set DJANGO_ALLOWED_HOSTS in .env}
+      DB_NAME: ${DB_NAME:?Set DB_NAME in .env}
+      DB_USER: ${DB_USER:?Set DB_USER in .env}
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      DB_HOST: ${COMPOSE_DB_HOST:?Set COMPOSE_DB_HOST in .env}
+      DB_PORT: ${COMPOSE_DB_PORT:?Set COMPOSE_DB_PORT in .env}
+      CACHE_URL: ${COMPOSE_CACHE_URL:?Set COMPOSE_CACHE_URL in .env}
+      CELERY_BROKER_URL: ${COMPOSE_CELERY_BROKER_URL:?Set COMPOSE_CELERY_BROKER_URL in .env}
+      CELERY_RESULT_BACKEND: ${COMPOSE_CELERY_RESULT_BACKEND:?Set COMPOSE_CELERY_RESULT_BACKEND in .env}
+      LOG_FILE_PATH: ${COMPOSE_LOG_FILE_PATH:?Set COMPOSE_LOG_FILE_PATH in .env}
+      INGESTION_LOCAL_ROOT: ${COMPOSE_INGESTION_LOCAL_ROOT:?Set COMPOSE_INGESTION_LOCAL_ROOT in .env}
+      TIME_ZONE: ${TIME_ZONE:?Set TIME_ZONE in .env}
+    ports:
+      - "${WEB_HOST_PORT:?Set WEB_HOST_PORT in .env}:8000"
+    volumes:
+      - .:/app
+      - mda_logs:/var/log/mda
+      - mda_ingestion:/data/ingestion
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+    command: ["celery", "-A", "config", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment: *django_environment
+    healthcheck:
+      disable: true
+    volumes:
+      - .:/app
+      - mda_logs:/var/log/mda
+      - mda_ingestion:/data/ingestion
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build:
+      context: .
+    command:
+      - celery
+      - -A
+      - config
+      - beat
+      - --loglevel=INFO
+      - --schedule=/var/lib/celery/beat-schedule
+    environment: *django_environment
+    healthcheck:
+      disable: true
+    volumes:
+      - .:/app
+      - mda_logs:/var/log/mda
+      - mda_ingestion:/data/ingestion
+      - mda_celery_beat:/var/lib/celery
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  redis_data:
+  mda_logs:
+  mda_ingestion:
+  mda_celery_beat:

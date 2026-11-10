@@ -1,0 +1,10 @@
+{
+  "include": ["apps", "config", "tests", "manage.py"],
+  "exclude": [".venv", "**/migrations/**", "**/__pycache__/**"],
+  "typeCheckingMode": "standard",
+  "pythonVersion": "3.12",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false,
+  "reportUnusedImport": true,
+  "reportUnusedVariable": true
+}
