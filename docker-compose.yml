@@ -55,13 +55,14 @@ services:
       CELERY_RESULT_BACKEND: ${COMPOSE_CELERY_RESULT_BACKEND:?Set COMPOSE_CELERY_RESULT_BACKEND in .env}
       LOG_FILE_PATH: /var/log/mda/app.log
       INGESTION_LOCAL_ROOT: ${COMPOSE_INGESTION_LOCAL_ROOT:?Set COMPOSE_INGESTION_LOCAL_ROOT in .env}
+      INGESTION_SCAN_INTERVAL_SECONDS: ${INGESTION_SCAN_INTERVAL_SECONDS:-60}
       TIME_ZONE: ${TIME_ZONE:?Set TIME_ZONE in .env}
     ports:
       - "${WEB_HOST_PORT:?Set WEB_HOST_PORT in .env}:8000"
     volumes:
       - .:/app
       - mda_logs:/var/log/mda
-      - mda_ingestion:/data/ingestion
+      - mda_ingestion:/sample_data
     depends_on:
       db:
         condition: service_healthy
@@ -92,7 +93,7 @@ services:
     volumes:
       - .:/app
       - mda_logs:/var/log/mda
-      - mda_ingestion:/data/ingestion
+      - mda_ingestion:/sample_data
     depends_on:
       db:
         condition: service_healthy
@@ -117,7 +118,7 @@ services:
     volumes:
       - .:/app
       - mda_logs:/var/log/mda
-      - mda_ingestion:/data/ingestion
+      - mda_ingestion:/sample_data
       - mda_celery_beat:/var/lib/celery
     depends_on:
       db:

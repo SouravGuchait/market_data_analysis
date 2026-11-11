@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, and the **User Audit Trail**. File ingestion workflows and analytics calculations remain future features.
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, and **Scheduled File Discovery and Ingestion**. Tick parsing, worker processing, and analytics calculations remain future features.
 
 ## Implemented features
 
@@ -143,6 +143,52 @@ audit row and sets the actor to null.
 
 Ingestion workers are future work.
 
+### Feature 005: Scheduled File Discovery and Ingestion
+
+Celery Beat calls `apps.ingestion.tasks.scan_enabled_ingestion_rules` every
+`INGESTION_SCAN_INTERVAL_SECONDS` (default `60`). Each enabled rule is scanned
+only when its own `scan_interval_seconds` has elapsed, so the global Beat cadence
+is the lower bound.
+
+Rules are administrator-controlled (Django admin or ORM). No API accepts a
+filesystem path. A rule stores its storage backend, relative location under
+`INGESTION_LOCAL_ROOT`, glob pattern, supported formats, scan interval, stability
+policy, schema/instrument/exchange mappings, and scan watermark/status. Local and
+EFS rules use the local filesystem adapter; the S3 choice is reserved and fails
+loudly until an adapter is added. New rules default to `file_pattern="*"` and
+the supported formats `csv`, `json` and `xlsx`; a rule can narrow discovery by
+changing either setting.
+
+Discovery uses a storage-adapter contract (`list_objects`, `stat`, `open`,
+content hash) so parsing and scheduler code do not depend on a single storage
+implementation. The local adapter enforces that rule locations and object keys
+stay inside the configured root.
+
+For each object, the scan:
+
+- Tracks size and modification time across scans and requires both to remain
+  unchanged for `required_stable_scans` (default `2`). Files still being copied
+  are not processed.
+- Treats files at or before the rule's initial watermark (or previous successful
+  scan watermark) as historical, so pre-existing files are not ingested merely
+  because they are present.
+- Calculates a SHA-256 content hash and deduplicates against stored ingestion
+  records with a database unique constraint on rule, object key and content hash.
+- Creates a UUID ingestion record in `QUEUED`, records `DISCOVERED` and `QUEUED`
+  state transitions, and dispatches one Celery task after the record commits.
+- Marks a broker dispatch failure as `FAILED`; a later scan re-queues that
+  content instead of silently skipping it.
+
+A scan failure is persisted on the rule and does not advance the watermark. An
+unreadable object is recorded individually without stopping other objects, and a
+failing rule does not cancel unrelated rules. Scans and queued files produce
+system-attributed audit events (`ingestion_started`, `ingestion_completed`,
+`ingestion_failed`). Rule changes made in Django admin are attributed to the
+authenticated administrator.
+
+The per-file Celery task is the worker boundary; parsing, validation and tick
+persistence are implemented by the later ingestion-worker feature.
+
 ## Project layout
 
 ```text
@@ -153,7 +199,7 @@ Ingestion workers are future work.
 │   ├── audit/             # Append-only user and system audit records
 │   ├── common/            # Health, logging and middleware
 │   ├── exchanges/         # Exchange master data
-│   ├── ingestion/         # Reserved for a later ingestion feature
+│   ├── ingestion/         # Ingestion rules, storage discovery and lifecycle records
 │   ├── instruments/       # Instrument master data
 │   ├── market_data/       # Daily OHLCV and generator catalogs
 │   └── portfolios/        # User-owned portfolios and instrument configuration
@@ -415,6 +461,11 @@ environment:
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`
 - `LOG_FILE_PATH`
 - `INGESTION_LOCAL_ROOT`
+
+Optional ingestion settings:
+
+- `INGESTION_SCAN_INTERVAL_SECONDS` (default `60`) — Celery Beat discovery cadence.
+- `INGESTION_HASH_CHUNK_SIZE_BYTES` (default `1048576`) — content-hash read size.
 
 Production additionally requires `DJANGO_SETTINGS_MODULE=config.settings.production`
 and rejects the development secret key and an empty host list.
