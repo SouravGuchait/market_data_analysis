@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, and **Database Schema and Model Relationships**. Portfolio APIs, file ingestion workflows, analytics calculations and audit APIs remain future features.
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, and **User Portfolio and Configuration**. File ingestion workflows, analytics calculations and audit APIs remain future features.
 
 ## Implemented features
 
@@ -60,7 +60,55 @@ Registration, login, refresh, password-reset request, and confirmation use scope
 - Idempotent reference-catalog seeding for exchange, symbol, tick-column, asset-class and currency values.
 - MySQL bootstrap schema in `schema.sql` and Django migrations.
 
-Portfolio APIs and ingestion workers are future work.
+### Feature 003: User Portfolio and Configuration
+
+Portfolio routes are mounted under `/api/v1/portfolios/` and require JWT
+authentication.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/portfolios/` | List the authenticated user's portfolios. |
+| POST | `/api/v1/portfolios/` | Create a portfolio for the authenticated user. |
+| GET | `/api/v1/portfolios/{portfolio_id}/` | Retrieve one owned portfolio. |
+| PATCH | `/api/v1/portfolios/{portfolio_id}/` | Update name, description or status. |
+| DELETE | `/api/v1/portfolios/{portfolio_id}/` | Delete an owned portfolio. |
+| GET | `/api/v1/portfolios/{portfolio_id}/instruments/` | List portfolio instrument membership. |
+| POST | `/api/v1/portfolios/{portfolio_id}/instruments/` | Add an instrument to a portfolio. |
+| DELETE | `/api/v1/portfolios/{portfolio_id}/instruments/{id}/` | Remove an instrument membership. |
+
+Ownership is always derived from the authenticated request; the owner cannot be
+set or changed through request data. Every query is scoped to the authenticated
+user, and a portfolio belonging to another user returns the same `404` response
+as a missing portfolio.
+
+Portfolio instrument writes accept either `instrument_id` or
+`instrument_symbol`, and optionally either `exchange_id` or `exchange_code`,
+plus optional `alias` and `is_active`. Identifier symbols and exchange codes are
+matched case-insensitively. When only `instrument_symbol` is supplied, the
+symbol must identify exactly one active instrument; if it is listed on multiple
+exchanges, an exchange identifier is required. The exchange defaults to the
+instrument's exchange and must match it when supplied. Sending both forms of the
+same relationship is rejected. Read responses return nested instrument and
+exchange objects.
+
+Example request:
+
+```json
+{
+  "instrument_symbol": "ACME",
+  "exchange_code": "XNYS",
+  "alias": "Core holding",
+  "is_active": true
+}
+```
+
+
+`PortfolioInstrument.exchange` is stored explicitly for the portfolio
+configuration, is backfilled from the instrument by migration `0003`, and is
+validated in both the model and serializer. The existing unique constraint on
+`portfolio + instrument` prevents duplicate membership.
+
+Ingestion workers are future work.
 
 ## Project layout
 
@@ -75,7 +123,7 @@ Portfolio APIs and ingestion workers are future work.
 │   ├── ingestion/         # Reserved for a later ingestion feature
 │   ├── instruments/       # Instrument master data
 │   ├── market_data/       # Daily OHLCV and generator catalogs
-│   └── portfolios/        # Relationship models; APIs are future work
+│   └── portfolios/        # User-owned portfolios and instrument configuration
 ├── config/
 │   ├── settings/          # base, development, production, test
 │   ├── celery.py
