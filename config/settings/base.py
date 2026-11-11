@@ -5,8 +5,9 @@ modules (``development``, ``production``, ``test``) are responsible for
 providing safe defaults or failing fast when a required value is missing.
 """
 from __future__ import annotations
-from datetime import timedelta
+
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -200,7 +201,9 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 APP_VERSION = env_str("APP_VERSION", "0.1.0")
-INGESTION_LOCAL_ROOT = str(resolve_path(env_str("INGESTION_LOCAL_ROOT", "data/ingestion")))
+INGESTION_LOCAL_ROOT = str(resolve_path(env_str("INGESTION_LOCAL_ROOT", "sample_data")))
+INGESTION_SCAN_INTERVAL_SECONDS = max(1, env_int("INGESTION_SCAN_INTERVAL_SECONDS", 60))
+INGESTION_HASH_CHUNK_SIZE_BYTES = max(1, env_int("INGESTION_HASH_CHUNK_SIZE_BYTES", 1024 * 1024))
 API_PREFIX = "api/v1/"
 
 # ---------------------------------------------------------------------------
@@ -274,6 +277,12 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # Keep Django's console + rotating-file handlers for worker and beat output
 # instead of letting Celery replace the root logger configuration.
 CELERY_WORKER_HIJACK_ROOT_LOGGER = False
+CELERY_BEAT_SCHEDULE = {
+    "scan-enabled-ingestion-rules": {
+        "task": "apps.ingestion.tasks.scan_enabled_ingestion_rules",
+        "schedule": timedelta(seconds=INGESTION_SCAN_INTERVAL_SECONDS),
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Logging

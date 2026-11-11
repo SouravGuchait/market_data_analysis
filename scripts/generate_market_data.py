@@ -14,6 +14,7 @@ Examples:
     python scripts/generate_market_data.py --exponent 5 --seed 42
     python scripts/generate_market_data.py --base 2 --exponent 16 --symbols 8
     python scripts/generate_market_data.py --symbols 5 --days 100   # legacy
+    python scripts/generate_market_data.py --symbols 10 --exponent 3 --ticks-per-day 100 --seed 42 --output-dir /sample_data
 """
 import secrets
 import argparse

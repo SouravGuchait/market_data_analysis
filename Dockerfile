@@ -22,8 +22,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 RUN groupadd --system app \
     && useradd --system --uid 1000 --gid app --create-home app \
-    && mkdir -p /var/log/mda /data/ingestion /var/lib/celery \
-    && chown -R app:app /var/log/mda /data/ingestion /var/lib/celery
+    && mkdir -p /var/log/mda /sample_data /var/lib/celery \
+    && chown -R app:app /var/log/mda /sample_data /var/lib/celery
 
 COPY --chown=app:app . .
 
