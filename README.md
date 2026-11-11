@@ -3,11 +3,11 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository currently implements **Feature 001: Project Foundation** only.
-Authentication, ingestion workflows, analytics calculations, portfolios and
-audit APIs are intentionally out of scope and will be added in later features.
+This repository implements **Project Foundation**, **Custom User Authentication**, and **Database Schema and Model Relationships**. Portfolio APIs, file ingestion workflows, analytics calculations and audit APIs remain future features.
 
-## Implemented in Feature 001
+## Implemented features
+
+### Feature 001: Project Foundation
 
 - Django 5.2 and Django REST Framework.
 - MySQL 8 as the persistent database, configured through environment variables.
@@ -21,9 +21,46 @@ audit APIs are intentionally out of scope and will be added in later features.
   `API_PREFIX` setting (currently `/api/v1`).
 - Console and rotating-file structured logging with request correlation IDs.
 - Liveness and readiness health endpoints.
-- Exchange and instrument master-data models, with database constraints.
+- Exchange master-data model.
 - Docker Compose for local development with MySQL, Redis, web, worker and beat.
 - Unit and integration test structure with pytest and pytest-django.
+
+### Custom User Authentication
+
+Authentication routes are mounted under `/api/v1/auth/`.
+
+| Method | Endpoint | View | Purpose |
+| --- | --- | --- | --- |
+| POST | `/api/v1/auth/register/` | `RegisterView.post` | Create an account from username, email, password, and password confirmation. |
+| POST | `/api/v1/auth/login/` | `LoginView.post` | Authenticate using a username or email and password; return access and refresh JWTs. |
+| POST | `/api/v1/auth/token/refresh/` | `ThrottledTokenRefreshView` | Refresh an access token using a refresh token. |
+| POST | `/api/v1/auth/logout/` | `LogoutView.post` | Blacklist the submitted refresh token for the authenticated user. |
+| GET | `/api/v1/auth/me/` | `CurrentUserView.get` | Return the authenticated user's profile. |
+| POST | `/api/v1/auth/password-reset/` | `PasswordResetRequestView.post` | Request a reset link by email; return a generic response. |
+| POST | `/api/v1/auth/password-reset/confirm/` | `PasswordResetConfirmView.post` | Set a new password using a valid, unused reset token. |
+
+#### Authentication functions
+
+- **Registration:** validates username and email uniqueness, confirms the password, applies Django password validators, hashes the password, and returns safe account fields.
+- **Login:** resolves username or email case-insensitively, checks the password and account status, and returns a generic authentication error on failure.
+- **Token refresh:** uses SimpleJWT refresh-token validation and the `anon_token_refresh` throttle scope.
+- **Logout:** blacklists the submitted refresh token. Requires authentication.
+- **Current user:** requires authentication and uses the `user_profile` throttle scope.
+- **Password-reset request:** generates a random token, stores its SHA-256 hash, and emails the reset link using the configured frontend URL. The response does not reveal whether the email exists.
+- **Password-reset confirmation:** checks token validity and password confirmation, validates the new password, stores its hash, marks the reset token used, and blacklists the user's outstanding JWTs.
+
+Registration, login, refresh, password-reset request, and confirmation use scoped throttles. JWT refresh rotation and blacklist behavior are configured in SimpleJWT.
+
+### Database Schema and Model Relationships
+
+- Shared exchange and instrument records, with per-exchange symbol uniqueness.
+- Daily OHLCV records with daily uniqueness and OHLC database constraints.
+- User-owned portfolios and an explicit portfolio-instrument association.
+- A mapping service for validating and persisting generator rows.
+- Idempotent reference-catalog seeding for exchange, symbol, tick-column, asset-class and currency values.
+- MySQL bootstrap schema in `schema.sql` and Django migrations.
+
+Portfolio APIs and ingestion workers are future work.
 
 ## Project layout
 
@@ -37,8 +74,8 @@ audit APIs are intentionally out of scope and will be added in later features.
 │   ├── exchanges/         # Exchange master data
 │   ├── ingestion/         # Reserved for a later ingestion feature
 │   ├── instruments/       # Instrument master data
-│   ├── market_data/       # Reserved for later market-data features
-│   └── portfolios/        # Reserved for a later portfolio feature
+│   ├── market_data/       # Daily OHLCV and generator catalogs
+│   └── portfolios/        # Relationship models; APIs are future work
 ├── config/
 │   ├── settings/          # base, development, production, test
 │   ├── celery.py

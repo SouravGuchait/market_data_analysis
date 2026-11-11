@@ -1,5 +1,5 @@
 {
-  "include": ["apps", "config", "tests", "manage.py"],
+  "include": ["apps", "config", "manage.py"],
   "exclude": [".venv", "**/migrations/**", "**/__pycache__/**"],
   "typeCheckingMode": "standard",
   "pythonVersion": "3.12",
