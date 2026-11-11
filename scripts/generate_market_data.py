@@ -15,13 +15,16 @@ Examples:
     python scripts/generate_market_data.py --symbols 5 --days 100   # legacy
     python scripts/generate_market_data.py --symbols 10 --exponent 3 --ticks-per-day 100 --seed 42 --output-dir /sample_data
 """
+
 import secrets
 import argparse
 import json
 import logging
 import math
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from typing import TypedDict
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -29,9 +32,51 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# One market-data row. Values are deliberately loose: dirty fixtures hold
-# strings, None, or missing keys where clean rows hold numbers.
-Row = dict[str, object]
+
+class InstrumentData(TypedDict):
+    exchange: str
+    exchange_name: str
+    timezone: str
+    symbol: str
+    name: str
+    asset_class: str
+    currency: str
+
+
+class MarketRow(InstrumentData):
+    date: str
+    timestamp: str
+    open: float
+    high: float
+    low: float
+    close: float
+    adjusted_close: float
+    volume: int
+
+
+class TradeRow(TypedDict):
+    exchange: str
+    symbol: str
+    trade_id: str
+    date: str
+    timestamp: str
+    price: float
+    size: int
+
+
+def _number(row: Mapping[str, object], key: str) -> float:
+    value = row.get(key)
+    if isinstance(value, (int, float)):
+        return float(value)
+    raise ValueError(f"Fixture field {key!r} must be numeric.")
+
+
+def _string(row: Mapping[str, object], key: str) -> str:
+    value = row.get(key)
+    if isinstance(value, str):
+        return value
+    raise ValueError(f"Fixture field {key!r} must be text.")
+
 
 EXCHANGES = [
     ("XNYS", "New York Stock Exchange", "America/New_York"),
@@ -109,11 +154,11 @@ ERROR_KINDS = [
 ]
 
 
-def build_instruments(count: int) -> list[Row]:
+def build_instruments(count: int) -> list[InstrumentData]:
     """Return `count` instrument descriptors drawn from a fixed vocabulary."""
     if count < 1:
         raise ValueError("At least one instrument is required.")
-    instruments: list[Row] = []
+    instruments: list[InstrumentData] = []
     for index in range(count):
         base_symbol, base_name = SYMBOL_POOL[index % len(SYMBOL_POOL)]
         generation = index // len(SYMBOL_POOL)
@@ -146,7 +191,7 @@ def build_dates(start: date, days: int) -> list[date]:
     return dates
 
 
-def _assert_clean(row: Row) -> None:
+def _assert_clean(row: MarketRow) -> None:
     """Guard against accidentally invalid rows in the clean dataset."""
     assert row["low"] <= min(row["open"], row["close"]), row
     assert row["high"] >= max(row["open"], row["close"]), row
@@ -156,10 +201,10 @@ def _assert_clean(row: Row) -> None:
 
 
 def generate_rows(
-    instruments: list[Row], dates: list[date], rng: np.random.Generator
-) -> list[Row]:
+    instruments: list[InstrumentData], dates: list[date], rng: np.random.Generator
+) -> list[MarketRow]:
     """Generate plausible OHLCV rows with rounding-safe intra-day ranges."""
-    rows: list[Row] = []
+    rows: list[MarketRow] = []
     last_close: dict[str, float] = {}
     for day in dates:
         for item in instruments:
@@ -172,7 +217,7 @@ def generate_rows(
             adjusted = close * float(rng.uniform(0.99, 0.999))
             volume = int(rng.integers(1_000, 10_000_000))
             last_close[symbol] = close
-            row = {
+            row: MarketRow = {
                 "exchange": item["exchange"],
                 "exchange_name": item["exchange_name"],
                 "timezone": item["timezone"],
@@ -198,13 +243,13 @@ def generate_rows(
     return rows
 
 
-def make_dirty_rows(rows: list[Row], rng: np.random.Generator) -> list[Row]:
+def make_dirty_rows(rows: list[MarketRow], rng: np.random.Generator) -> list[dict[str, object]]:
     """Corrupt a copy of the rows so every error kind appears at least once.
 
     Very small datasets apply only the corruption kinds that fit; the
     duplicate-date row is always appended last.
     """
-    dirty = [dict(row) for row in rows]
+    dirty: list[dict[str, object]] = [dict(row) for row in rows]
     count = len(dirty)
     slot_kinds = [kind for kind in ERROR_KINDS if kind != "duplicate_date"]
     apply_kinds = slot_kinds[: min(count, len(slot_kinds))]
@@ -217,35 +262,35 @@ def make_dirty_rows(rows: list[Row], rng: np.random.Generator) -> list[Row]:
         if kind == "missing_field":
             row.pop("volume", None)
         elif kind == "bad_ohlc":
-            row["high"], row["low"] = row["low"], row["high"]
+            row["high"], row["low"] = _number(row, "low"), _number(row, "high")
         elif kind == "negative_volume":
             row["volume"] = -int(rng.integers(1, 5_000))
         elif kind == "bad_date":
-            row["timestamp"] = f"{row['timestamp']}tail"
+            row["timestamp"] = f"{_string(row, 'timestamp')}tail"
         elif kind == "null_close":
             row["close"] = None
         elif kind == "bad_type":
             row["volume"] = "12k"
         elif kind == "malformed_number":
-            row["open"] = f'{row["open"]:,.4f}'
+            row["open"] = f"{_number(row, 'open'):,.4f}"
         elif kind == "empty_string":
             row["adjusted_close"] = ""
         elif kind == "negative_price":
-            row["low"] = round(row["low"] - row["close"] * 2, 4)
+            row["low"] = round(_number(row, "low") - _number(row, "close") * 2, 4)
         elif kind == "date_mismatch":
             # `date` disagrees with the exchange-local date of `timestamp`.
-            row["date"] = (date.fromisoformat(row["date"]) + timedelta(days=1)).isoformat()
+            row["date"] = (date.fromisoformat(_string(row, "date")) + timedelta(days=1)).isoformat()
         elif kind == "unknown_exchange":
             row["exchange"] = "ZZZZ"
-    exact_duplicate = dict(rows[0])
-    conflicting_duplicate = dict(rows[0])
-    conflicting_duplicate["volume"] = int(rows[0]["volume"]) + 1
+    exact_duplicate: dict[str, object] = dict(rows[0])
+    conflicting_duplicate: dict[str, object] = dict(rows[0])
+    conflicting_duplicate["volume"] = rows[0]["volume"] + 1
     return dirty + [exact_duplicate, conflicting_duplicate]
 
 
 def generate_ticks(
-    rows: list[Row], ticks_per_day: int, rng: np.random.Generator
-) -> list[Row]:
+    rows: list[MarketRow], ticks_per_day: int, rng: np.random.Generator
+) -> list[TradeRow]:
     """Expand each clean daily candle into `ticks_per_day` individual trades.
 
     Ticks are consistent with their candle: the first price is the open, the
@@ -254,7 +299,7 @@ def generate_ticks(
     """
     if not 4 <= ticks_per_day <= MAX_TICKS_PER_DAY:
         raise ValueError(f"--ticks-per-day must be between 4 and {MAX_TICKS_PER_DAY}.")
-    ticks: list[Row] = []
+    ticks: list[TradeRow] = []
     for row in rows:
         zone = ZoneInfo(row["timezone"])
         open_t, close_t = SESSIONS.get(row["timezone"], DEFAULT_SESSION)
@@ -273,42 +318,39 @@ def generate_ticks(
             volume - ticks_per_day, np.full(ticks_per_day, 1.0 / ticks_per_day)
         )
         for i in range(ticks_per_day):
-            ticks.append(
-                {
-                    "exchange": row["exchange"],
-                    "symbol": row["symbol"],
-                    "trade_id": f"{row['symbol']}-{row['date']}-{i:04d}",
-                    "date": row["date"],
-                    "timestamp": (start + timedelta(milliseconds=int(offsets[i]))).isoformat(
-                        timespec="milliseconds"
-                    ),
-                    "price": float(prices[i]),
-                    "size": int(sizes[i]),
-                }
-            )
+            tick: TradeRow = {
+                "exchange": row["exchange"],
+                "symbol": row["symbol"],
+                "trade_id": f"{row['symbol']}-{row['date']}-{i:04d}",
+                "date": row["date"],
+                "timestamp": (start + timedelta(milliseconds=int(offsets[i]))).isoformat(
+                    timespec="milliseconds"
+                ),
+                "price": float(prices[i]),
+                "size": int(sizes[i]),
+            }
+            ticks.append(tick)
     return ticks
 
 
 def write_csv(
-    rows: list[Row], path: Path, columns: list[str] = COLUMNS
+    rows: Sequence[Mapping[str, object]], path: Path, columns: list[str] = COLUMNS
 ) -> None:
     pd.DataFrame(rows, columns=pd.Index(columns)).to_csv(path, index=False)
 
 
-def write_json(rows: list[Row], path: Path) -> None:
+def write_json(rows: Sequence[Mapping[str, object]], path: Path) -> None:
     payload = [{key: row.get(key) for key in COLUMNS} for row in rows]
     _ = path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def write_xlsx(
-    rows: list[Row], path: Path, columns: list[str] = COLUMNS
+    rows: Sequence[Mapping[str, object]], path: Path, columns: list[str] = COLUMNS
 ) -> None:
     pd.DataFrame(rows, columns=pd.Index(columns)).to_excel(path, index=False)
 
 
-def resolve_row_target(
-    symbols: int, days: int, exponent: int | None, base: int
-) -> tuple[int, int]:
+def resolve_row_target(symbols: int, days: int, exponent: int | None, base: int) -> tuple[int, int]:
     """Return (target_rows, days_needed). Exponent mode overrides `days`."""
     if exponent is None:
         return symbols * days, days
@@ -340,8 +382,7 @@ def generate(
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     target_rows, days_needed = resolve_row_target(symbols, days, exponent, base)
-    logger.info("Target clean rows=%d (%d symbols x %d days)",
-                target_rows, symbols, days_needed)
+    logger.info("Target clean rows=%d (%d symbols x %d days)", target_rows, symbols, days_needed)
     instruments = build_instruments(symbols)
     try:
         dates = build_dates(start or date(2024, 1, 2), days_needed)
@@ -360,8 +401,7 @@ def generate(
     for extension, writer in writers.items():
         for label, payload in payloads.items():
             if extension == "xlsx" and len(payload) > XLSX_MAX_ROWS:
-                logger.warning("Skipping %s xlsx: %d rows exceeds Excel limit",
-                               label, len(payload))
+                logger.warning("Skipping %s xlsx: %d rows exceeds Excel limit", label, len(payload))
                 continue
             name = f"synthetic_market_{label}_{run_stamp}.{extension}"
             writer(payload, out / name)
@@ -384,9 +424,7 @@ def generate(
             _ = (out / name).write_bytes(b"")
 
     # Unexpected extra column appended to an otherwise valid subset.
-    unexpected = [
-        dict(row, unexpected_extra="ignore-me") for row in rows[: max(len(rows) // 4, 1)]
-    ]
+    unexpected = [dict(row, unexpected_extra="ignore-me") for row in rows[: max(len(rows) // 4, 1)]]
     name = f"synthetic_market_unexpected_columns_{run_stamp}.csv"
     counts[name] = len(unexpected)
     write_csv(unexpected, out / name, columns=COLUMNS + ["unexpected_extra"])
