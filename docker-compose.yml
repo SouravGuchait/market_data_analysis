@@ -67,6 +67,20 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    build:
+      context: .
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    environment: *django_environment
+    volumes:
+      - .:/app
+      - mda_logs:/var/log/mda
+    depends_on:
+      db:
+        condition: service_healthy
 
   worker:
     build:
@@ -84,6 +98,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   beat:
     build:
@@ -108,6 +124,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
   mysql_data:

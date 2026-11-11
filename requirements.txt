@@ -6,6 +6,8 @@ python-dotenv>=1.0,<2.0
 drf-spectacular>=0.28,<1.0
 django-cors-headers>=3.1,<4.0
 django-stubs>=5.2,<6.2
+djangorestframework-simplejwt>=5.0,<6.0
+django-zxcvbn-password-validator
 
 # Data, database, and asynchronous work
 mysqlclient>=2.2,<3.0
