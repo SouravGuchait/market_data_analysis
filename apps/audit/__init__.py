@@ -1,1 +1,1 @@
-"""Audit app; implementation is added by a later feature."""
+"""Append-only user and system audit records."""

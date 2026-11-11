@@ -6,12 +6,15 @@ import uuid
 from typing import Any, cast
 
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.audit.models import AuditAction, AuditResourceType, AuditStatus
+from apps.audit.services import record_audit_event
 from apps.portfolios.models import Portfolio
 from apps.portfolios.pagination import PortfolioPagination
 from apps.portfolios.selectors import (
@@ -86,7 +89,17 @@ class PortfolioListCreateView(PortfolioAPIView):
             return failure("Validation failed", serializer.errors)
 
         validated_data = cast(dict[str, Any], serializer.validated_data)
-        portfolio = create_portfolio(owner=request.user, data=validated_data)
+        with transaction.atomic():
+            portfolio = create_portfolio(owner=request.user, data=validated_data)
+            record_audit_event(
+                actor=request.user,
+                action=AuditAction.PORTFOLIO_CREATED,
+                resource_type=AuditResourceType.PORTFOLIO,
+                resource_id=portfolio.pk,
+                status=AuditStatus.SUCCESS,
+                request=request,
+                metadata={"name": portfolio.name},
+            )
         return success(
             "Portfolio created",
             PortfolioReadSerializer(portfolio).data,
@@ -111,7 +124,18 @@ class PortfolioDetailView(PortfolioAPIView):
             return failure("Validation failed", serializer.errors)
 
         validated_data = cast(dict[str, Any], serializer.validated_data)
-        portfolio = update_portfolio(portfolio, validated_data)
+        changed_fields = sorted(validated_data)
+        with transaction.atomic():
+            portfolio = update_portfolio(portfolio, validated_data)
+            record_audit_event(
+                actor=request.user,
+                action=AuditAction.PORTFOLIO_UPDATED,
+                resource_type=AuditResourceType.PORTFOLIO,
+                resource_id=portfolio.pk,
+                status=AuditStatus.SUCCESS,
+                request=request,
+                metadata={"changed_fields": changed_fields},
+            )
         return success("Portfolio updated", PortfolioReadSerializer(portfolio).data)
 
     def delete(self, request: Request, portfolio_id: uuid.UUID) -> Response:
@@ -119,7 +143,19 @@ class PortfolioDetailView(PortfolioAPIView):
         if portfolio is None:
             return portfolio_not_found()
 
-        delete_portfolio(portfolio)
+        portfolio_id = portfolio.pk
+        portfolio_name = portfolio.name
+        with transaction.atomic():
+            delete_portfolio(portfolio)
+            record_audit_event(
+                actor=request.user,
+                action=AuditAction.PORTFOLIO_DELETED,
+                resource_type=AuditResourceType.PORTFOLIO,
+                resource_id=portfolio_id,
+                status=AuditStatus.SUCCESS,
+                request=request,
+                metadata={"name": portfolio_name},
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -147,7 +183,21 @@ class PortfolioInstrumentListCreateView(PortfolioAPIView):
 
         validated_data = cast(dict[str, Any], serializer.validated_data)
         try:
-            portfolio_instrument = add_portfolio_instrument(portfolio, validated_data)
+            with transaction.atomic():
+                portfolio_instrument = add_portfolio_instrument(portfolio, validated_data)
+                record_audit_event(
+                    actor=request.user,
+                    action=AuditAction.PORTFOLIO_INSTRUMENT_ADDED,
+                    resource_type=AuditResourceType.PORTFOLIO_INSTRUMENT,
+                    resource_id=portfolio_instrument.pk,
+                    status=AuditStatus.SUCCESS,
+                    request=request,
+                    metadata={
+                        "portfolio_id": str(portfolio.pk),
+                        "instrument_symbol": portfolio_instrument.instrument.symbol,
+                        "exchange_code": portfolio_instrument.exchange.code,
+                    },
+                )
         except DuplicatePortfolioInstrumentError:
             return failure(
                 "Portfolio instrument already exists",
@@ -180,5 +230,21 @@ class PortfolioInstrumentDetailView(PortfolioAPIView):
                 status.HTTP_404_NOT_FOUND,
             )
 
-        remove_portfolio_instrument(portfolio_instrument)
+        membership_id = portfolio_instrument.pk
+        metadata = {
+            "portfolio_id": str(portfolio.pk),
+            "instrument_symbol": portfolio_instrument.instrument.symbol,
+            "exchange_code": portfolio_instrument.exchange.code,
+        }
+        with transaction.atomic():
+            remove_portfolio_instrument(portfolio_instrument)
+            record_audit_event(
+                actor=request.user,
+                action=AuditAction.PORTFOLIO_INSTRUMENT_REMOVED,
+                resource_type=AuditResourceType.PORTFOLIO_INSTRUMENT,
+                resource_id=membership_id,
+                status=AuditStatus.SUCCESS,
+                request=request,
+                metadata=metadata,
+            )
         return Response(status=status.HTTP_204_NO_CONTENT)
