@@ -72,7 +72,7 @@ TICK_COLUMNS = [
 XLSX_MAX_ROWS = 1_048_575  # Excel limit minus header row
 
 ASSET_CLASSES = ["equity", "etf", "equity", "equity", "crypto"]
-CURRENCIES = ["USD", "USD", "USD", "USD", "EUR"]
+CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CNY", "CHF"]
 
 COLUMNS = [
     "exchange",
