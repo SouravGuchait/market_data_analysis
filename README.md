@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, and **User Portfolio and Configuration**. File ingestion workflows, analytics calculations and audit APIs remain future features.
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, and the **User Audit Trail**. File ingestion workflows and analytics calculations remain future features.
 
 ## Implemented features
 
@@ -108,6 +108,39 @@ configuration, is backfilled from the instrument by migration `0003`, and is
 validated in both the model and serializer. The existing unique constraint on
 `portfolio + instrument` prevents duplicate membership.
 
+### Feature 004: User Audit Trail
+
+Audit routes are mounted under `/api/v1/audit/` and require JWT authentication.
+
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/audit/` | List audit records visible to the authenticated user. |
+| GET | `/api/v1/audit/{audit_id}/` | Retrieve one visible audit record. |
+
+Ordinary users see only records attributed to their own account. Staff users
+are the restricted administrative audience and may inspect all records,
+including system events with no user actor. The collection endpoint supports
+`action`, `resource_type`, `status`, `start_date` and `end_date` query filters.
+Date filters accept an ISO 8601 date or datetime; date-only end values cover the
+whole day. Collections use the standard pagination envelope with 20 results per
+page and a maximum page size of 100.
+
+Audit records include a UUID, nullable actor, action, resource type and
+identifier, status, timestamp, request correlation ID, source IP and sanitized
+metadata. The service redacts keys containing password, secret, token,
+authorization, cookie or API-key values. Source IP comes from the socket peer
+address; forwarding headers are not trusted.
+
+Records are created for registration, login success and failure, logout,
+password-reset request and completion, portfolio creation, update and deletion,
+and portfolio instrument addition and removal. Ingestion and analytics actions
+have constants in the audit model, and `apps.audit.services.record_system_event`
+records an unattributed system event for future asynchronous workflows.
+
+The audit model is append-only: application code cannot update or delete a
+stored record, and no write API is exposed. Deleting an actor user preserves the
+audit row and sets the actor to null.
+
 Ingestion workers are future work.
 
 ## Project layout
@@ -117,7 +150,7 @@ Ingestion workers are future work.
 ├── apps/
 │   ├── accounts/          # Custom user model
 │   ├── analytics/         # Reserved for a later analytics feature
-│   ├── audit/             # Reserved for a later audit feature
+│   ├── audit/             # Append-only user and system audit records
 │   ├── common/            # Health, logging and middleware
 │   ├── exchanges/         # Exchange master data
 │   ├── ingestion/         # Reserved for a later ingestion feature
