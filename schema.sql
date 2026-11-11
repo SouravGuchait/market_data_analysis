@@ -95,6 +95,46 @@ ALTER TABLE `accounts_passwordresettoken` ADD CONSTRAINT `accounts_passwordreset
 
 CREATE INDEX `accounts_passwordresettoken_user_id_2789bc5c` ON `accounts_passwordresettoken` (`user_id`);
 
+CREATE TABLE `mda_instruments` (`id` bigint AUTO_INCREMENT NOT NULL PRIMARY KEY, `created_at` datetime(6) NOT NULL, `updated_at` datetime(6) NOT NULL, `symbol` varchar(50) NOT NULL, `name` varchar(255) NOT NULL, `asset_class` varchar(20) NOT NULL, `currency` varchar(3) NOT NULL, `is_active` bool NOT NULL, `exchange_id` bigint NOT NULL, CONSTRAINT `unique_exchange_symbol` UNIQUE (`exchange_id`, `symbol`));
+CREATE INDEX `idx_instrument_symbol` ON `mda_instruments` (`symbol`);
+CREATE INDEX `mda_instruments_exchange_id` ON `mda_instruments` (`exchange_id`);
+ALTER TABLE `mda_instruments` ADD CONSTRAINT `mda_instruments_exchange_id_fk` FOREIGN KEY (`exchange_id`) REFERENCES `exchanges_exchange` (`id`);
+
+CREATE TABLE `mda_daily_ohlcv` (`id` bigint AUTO_INCREMENT NOT NULL PRIMARY KEY, `created_at` datetime(6) NOT NULL, `updated_at` datetime(6) NOT NULL, `trading_date` date NOT NULL, `timestamp` datetime(6) NOT NULL, `open` decimal(20,6) NOT NULL CHECK (`open` > 0), `high` decimal(20,6) NOT NULL CHECK (`high` > 0), `low` decimal(20,6) NOT NULL CHECK (`low` > 0), `close` decimal(20,6) NOT NULL CHECK (`close` > 0), `adjusted_close` decimal(20,6) NULL, `volume` bigint unsigned NOT NULL, `instrument_id` bigint NOT NULL, CONSTRAINT `unique_instrument_trading_date` UNIQUE (`instrument_id`, `trading_date`), CONSTRAINT `ohlcv_high_bounds` CHECK (`high` >= `open` AND `high` >= `close`), CONSTRAINT `ohlcv_low_bounds` CHECK (`low` <= `open` AND `low` <= `close`), CONSTRAINT `ohlcv_high_gte_low` CHECK (`high` >= `low`));
+CREATE INDEX `idx_ohlcv_date` ON `mda_daily_ohlcv` (`trading_date`);
+CREATE INDEX `mda_daily_ohlcv_instrument_id` ON `mda_daily_ohlcv` (`instrument_id`);
+ALTER TABLE `mda_daily_ohlcv` ADD CONSTRAINT `mda_daily_ohlcv_instrument_id_fk` FOREIGN KEY (`instrument_id`) REFERENCES `mda_instruments` (`id`);
+
+CREATE TABLE `mda_portfolios` (`id` char(32) NOT NULL PRIMARY KEY, `created_at` datetime(6) NOT NULL, `updated_at` datetime(6) NOT NULL, `name` varchar(255) NOT NULL, `description` longtext NOT NULL, `status` varchar(50) NOT NULL, `owner_id` integer NOT NULL);
+CREATE INDEX `mda_portfolios_owner_id` ON `mda_portfolios` (`owner_id`);
+ALTER TABLE `mda_portfolios` ADD CONSTRAINT `mda_portfolios_owner_id_fk` FOREIGN KEY (`owner_id`) REFERENCES `auth_user` (`id`);
+
+CREATE TABLE `mda_portfolio_instruments` (`id` char(32) NOT NULL PRIMARY KEY, `created_at` datetime(6) NOT NULL, `updated_at` datetime(6) NOT NULL, `alias` varchar(100) NOT NULL, `is_active` bool NOT NULL, `portfolio_id` char(32) NOT NULL, `instrument_id` bigint NOT NULL, CONSTRAINT `unique_portfolio_instrument` UNIQUE (`portfolio_id`, `instrument_id`));
+CREATE INDEX `mda_portfolio_instruments_instrument_id` ON `mda_portfolio_instruments` (`instrument_id`);
+CREATE INDEX `mda_portfolio_instruments_portfolio_id` ON `mda_portfolio_instruments` (`portfolio_id`);
+ALTER TABLE `mda_portfolio_instruments` ADD CONSTRAINT `mda_pi_portfolio_id_fk` FOREIGN KEY (`portfolio_id`) REFERENCES `mda_portfolios` (`id`);
+ALTER TABLE `mda_portfolio_instruments` ADD CONSTRAINT `mda_pi_instrument_id_fk` FOREIGN KEY (`instrument_id`) REFERENCES `mda_instruments` (`id`);
+
+-- Idempotent exchange master seed sourced from scripts/generate_market_data.py.
+INSERT IGNORE INTO `exchanges_exchange` (`code`, `name`, `timezone`, `is_active`, `created_at`, `updated_at`) VALUES
+('XNYS','New York Stock Exchange','America/New_York',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)),
+('XNAS','Nasdaq','America/New_York',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)),
+('XLON','London Stock Exchange','Europe/London',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6)),
+('XCME','CME Group','America/New_York',1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6));
+
+CREATE TABLE `mda_generator_symbols` (`symbol` varchar(20) NOT NULL PRIMARY KEY, `name` varchar(128) NOT NULL);
+CREATE TABLE `mda_tick_columns` (`name` varchar(32) NOT NULL PRIMARY KEY, `position` smallint unsigned NOT NULL UNIQUE);
+CREATE TABLE `mda_asset_classes` (`code` varchar(20) NOT NULL PRIMARY KEY, `position` smallint unsigned NOT NULL UNIQUE);
+CREATE TABLE `mda_currencies` (`code` varchar(3) NOT NULL PRIMARY KEY, `position` smallint unsigned NOT NULL UNIQUE);
+
+-- One-time seed from scripts/generate_market_data.py; rerunning is safe.
+INSERT IGNORE INTO `mda_generator_symbols` (`symbol`,`name`) VALUES
+('ACME','Acme Industrial'),('BETA','Beta Materials'),('CHRP','Chipwave Systems'),('DLTA','Delta Logistics'),('EPSN','Epsilon Energy'),('FBNK','Fjord Banking Group'),('GLXO','Glaxo Robotics'),('HRZN','Horizon Retail'),('INFX','Infinitix Data'),('JVNL','Javelin Networks');
+INSERT IGNORE INTO `mda_tick_columns` (`name`,`position`) VALUES
+('exchange',0),('symbol',1),('trade_id',2),('date',3),('timestamp',4),('price',5),('size',6);
+INSERT IGNORE INTO `mda_asset_classes` (`code`,`position`) VALUES ('equity',0),('etf',1),('crypto',2);
+INSERT IGNORE INTO `mda_currencies` (`code`,`position`) VALUES ('USD',0),('EUR',1),('GBP',2),('JPY',3),('CNY',4),('CHF',5);
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- Migration state for the schema above.
@@ -118,6 +158,13 @@ INSERT INTO `django_migrations` (`app`, `name`, `applied`) VALUES
   ('contenttypes', '0001_initial', UTC_TIMESTAMP(6)),
   ('contenttypes', '0002_remove_content_type_name', UTC_TIMESTAMP(6)),
   ('exchanges', '0001_initial', UTC_TIMESTAMP(6)),
+  ('exchanges', '0002_alter_exchange_options_alter_exchange_code_and_more', UTC_TIMESTAMP(6)),
+  ('exchanges', '0003_preserve_exchange_schema', UTC_TIMESTAMP(6)),
+  ('instruments', '0001_initial', UTC_TIMESTAMP(6)),
+  ('market_data', '0001_initial', UTC_TIMESTAMP(6)),
+  ('market_data', '0002_assetclass_currency_generatorsymbol_tickcolumn', UTC_TIMESTAMP(6)),
+  ('portfolios', '0001_initial', UTC_TIMESTAMP(6)),
+  ('portfolios', '0002_alter_portfolioinstrument_alias', UTC_TIMESTAMP(6)),
   ('sessions', '0001_initial', UTC_TIMESTAMP(6)),
   ('token_blacklist', '0001_initial', UTC_TIMESTAMP(6)),
   ('token_blacklist', '0002_outstandingtoken_jti_hex', UTC_TIMESTAMP(6)),
