@@ -67,6 +67,104 @@ class PortfolioWriteSerializer(serializers.ModelSerializer):
         }
 
 
+def _validate_relationship_types(
+    instrument: object,
+    instrument_symbol: object,
+    exchange: object,
+    exchange_by_code: object,
+) -> tuple[Instrument | None, str | None, Exchange | None, Exchange | None]:
+    if instrument is not None and not isinstance(instrument, Instrument):
+        raise serializers.ValidationError({"instrument_id": ["Invalid instrument."]})
+    if instrument_symbol is not None and not isinstance(instrument_symbol, str):
+        raise serializers.ValidationError({"instrument_symbol": ["Invalid symbol."]})
+    if exchange is not None and not isinstance(exchange, Exchange):
+        raise serializers.ValidationError({"exchange_id": ["Invalid exchange."]})
+    if exchange_by_code is not None and not isinstance(exchange_by_code, Exchange):
+        raise serializers.ValidationError({"exchange_code": ["Invalid exchange code."]})
+    return (
+        instrument if isinstance(instrument, Instrument) else None,
+        instrument_symbol if isinstance(instrument_symbol, str) else None,
+        exchange if isinstance(exchange, Exchange) else None,
+        exchange_by_code if isinstance(exchange_by_code, Exchange) else None,
+    )
+
+
+def _extract_relationship_fields(
+    attrs: dict[str, object],
+) -> tuple[Instrument | None, str | None, Exchange | None, Exchange | None]:
+    instrument = attrs.pop("instrument", None)
+    instrument_symbol = attrs.pop("instrument_symbol", None)
+    exchange = attrs.pop("exchange", None)
+    exchange_by_code = attrs.pop("exchange_code", None)
+    instrument, instrument_symbol, exchange, exchange_by_code = _validate_relationship_types(
+        instrument, instrument_symbol, exchange, exchange_by_code
+    )
+    if instrument is not None and instrument_symbol is not None:
+        raise serializers.ValidationError(
+            {"instrument_symbol": ["Provide either instrument_id or instrument_symbol."]}
+        )
+    if instrument is None and instrument_symbol is None:
+        raise serializers.ValidationError(
+            {"instrument_symbol": ["Provide instrument_id or instrument_symbol."]}
+        )
+    if exchange is not None and exchange_by_code is not None:
+        raise serializers.ValidationError(
+            {"exchange_code": ["Provide either exchange_id or exchange_code, not both."]}
+        )
+    if exchange_by_code is not None:
+        exchange = exchange_by_code
+    return instrument, instrument_symbol, exchange, exchange_by_code
+
+
+def _instrument_for_symbol(
+    symbol: str,
+    exchange: Exchange | None,
+    exchange_field: str,
+) -> Instrument:
+    instruments = Instrument.objects.filter(symbol__iexact=symbol, is_active=True)
+    if exchange is not None:
+        instruments = instruments.filter(exchange=exchange)
+    matches = list(instruments[:2])
+    if not matches:
+        other_exchange_exists = (
+            exchange is not None
+            and Instrument.objects.filter(symbol__iexact=symbol, is_active=True).exists()
+        )
+        if other_exchange_exists:
+            raise serializers.ValidationError(
+                {exchange_field: ["The selected exchange must match the instrument's exchange."]}
+            )
+        raise serializers.ValidationError(
+            {"instrument_symbol": [f"Unknown or inactive instrument symbol: {symbol}."]}
+        )
+    if len(matches) > 1:
+        raise serializers.ValidationError(
+            {
+                "instrument_symbol": [
+                    "Multiple instruments use this symbol; provide exchange_code or exchange_id."
+                ]
+            }
+        )
+    return matches[0]
+
+
+def _validate_instrument_exchange(
+    instrument: Instrument,
+    exchange: Exchange | None,
+    exchange_field: str,
+) -> Exchange:
+    target_exchange = exchange or instrument.exchange
+    if target_exchange != instrument.exchange:
+        raise serializers.ValidationError(
+            {exchange_field: ["The selected exchange must match the instrument's exchange."]}
+        )
+    if not target_exchange.is_active:
+        raise serializers.ValidationError(
+            {exchange_field: ["The selected exchange is not active."]}
+        )
+    return target_exchange
+
+
 class PortfolioInstrumentWriteSerializer(serializers.ModelSerializer):
     instrument_id = serializers.PrimaryKeyRelatedField(
         source="instrument",
@@ -104,95 +202,17 @@ class PortfolioInstrumentWriteSerializer(serializers.ModelSerializer):
         }
 
     def validate(self, attrs: dict[str, object]) -> dict[str, object]:
-        instrument = attrs.pop("instrument", None)
-        instrument_symbol = attrs.pop("instrument_symbol", None)
-        exchange = attrs.pop("exchange", None)
-        exchange_by_code = attrs.pop("exchange_code", None)
-
-        if instrument is not None and not isinstance(instrument, Instrument):
-            raise serializers.ValidationError({"instrument_id": ["Invalid instrument."]})
-        if instrument_symbol is not None and not isinstance(instrument_symbol, str):
-            raise serializers.ValidationError({"instrument_symbol": ["Invalid symbol."]})
-        if exchange is not None and not isinstance(exchange, Exchange):
-            raise serializers.ValidationError({"exchange_id": ["Invalid exchange."]})
-        if exchange_by_code is not None and not isinstance(exchange_by_code, Exchange):
-            raise serializers.ValidationError({"exchange_code": ["Invalid exchange code."]})
-
-        if instrument is not None and instrument_symbol is not None:
-            raise serializers.ValidationError(
-                {"instrument_symbol": ["Provide either instrument_id or instrument_symbol."]}
-            )
-        if instrument is None and instrument_symbol is None:
-            raise serializers.ValidationError(
-                {"instrument_symbol": ["Provide instrument_id or instrument_symbol."]}
-            )
-
-        if exchange is not None and exchange_by_code is not None:
-            raise serializers.ValidationError(
-                {"exchange_code": ["Provide either exchange_id or exchange_code, not both."]}
-            )
-        if exchange_by_code is not None:
-            exchange = exchange_by_code
-
-        if instrument is None:
-            assert isinstance(instrument_symbol, str)
-            instruments = Instrument.objects.filter(
-                symbol__iexact=instrument_symbol,
-                is_active=True,
-            )
-            if exchange is not None:
-                instruments = instruments.filter(exchange=exchange)
-
-            matches = list(instruments[:2])
-            if not matches:
-                if (
-                    exchange is not None
-                    and Instrument.objects.filter(
-                        symbol__iexact=instrument_symbol,
-                        is_active=True,
-                    ).exists()
-                ):
-                    exchange_field = (
-                        "exchange_code" if exchange_by_code is not None else "exchange_id"
-                    )
-                    raise serializers.ValidationError(
-                        {
-                            exchange_field: [
-                                "The selected exchange must match the instrument's exchange."
-                            ]
-                        }
-                    )
-                raise serializers.ValidationError(
-                    {
-                        "instrument_symbol": [
-                            f"Unknown or inactive instrument symbol: {instrument_symbol}."
-                        ]
-                    }
-                )
-            if len(matches) > 1:
-                raise serializers.ValidationError(
-                    {
-                        "instrument_symbol": [
-                            "Multiple instruments use this symbol; provide exchange_code "
-                            "or exchange_id."
-                        ]
-                    }
-                )
-            instrument = matches[0]
-
-        target_exchange = exchange or instrument.exchange
+        instrument, symbol, exchange, exchange_by_code = _extract_relationship_fields(attrs)
         exchange_field = "exchange_code" if exchange_by_code is not None else "exchange_id"
-        if target_exchange != instrument.exchange:
-            raise serializers.ValidationError(
-                {exchange_field: ["The selected exchange must match the instrument's exchange."]}
-            )
-        if not target_exchange.is_active:
-            raise serializers.ValidationError(
-                {exchange_field: ["The selected exchange is not active."]}
-            )
-
+        if instrument is None:
+            assert isinstance(symbol, str)
+            instrument = _instrument_for_symbol(symbol, exchange, exchange_field)
         attrs["instrument"] = instrument
-        attrs["exchange"] = target_exchange
+        attrs["exchange"] = _validate_instrument_exchange(
+            instrument,
+            exchange,
+            exchange_field,
+        )
         return attrs
 
 

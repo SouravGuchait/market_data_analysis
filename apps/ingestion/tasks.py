@@ -8,18 +8,17 @@ bounded per-file task boundary that the discovery service dispatches.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-from celery import shared_task
+from celery import Task, shared_task
 
-from .models import Ingestion
+from .models import Ingestion, JsonValue
 from .services import scan_enabled_rules
 
 logger = logging.getLogger("apps.ingestion.tasks")
 
 
 @shared_task(name="apps.ingestion.tasks.scan_enabled_ingestion_rules")
-def scan_enabled_ingestion_rules() -> list[dict[str, Any]]:
+def scan_enabled_ingestion_rules() -> list[dict[str, JsonValue]]:
     """Scan every enabled rule that is due and return per-rule summaries."""
 
     results = scan_enabled_rules()
@@ -35,7 +34,7 @@ def scan_enabled_ingestion_rules() -> list[dict[str, Any]]:
     name="apps.ingestion.tasks.process_ingestion_file",
     acks_late=True,
 )
-def process_ingestion_file(self: Any, ingestion_id: str) -> None:
+def process_ingestion_file(self: Task, ingestion_id: str) -> None:
     """Per-file worker boundary.
 
     The task deliberately leaves the record QUEUED until the parsing and

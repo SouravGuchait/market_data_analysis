@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import secrets
-from typing import Any, cast
+from collections.abc import Mapping
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -45,7 +45,10 @@ class RegisterView(APIView):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
-            user = cast(User, serializer.save())
+            user_value: object = serializer.save()
+            if not isinstance(user_value, User):
+                raise TypeError("Registration serializer returned an unexpected user type.")
+            user = user_value
             record_audit_event(
                 actor=user,
                 action=AuditAction.REGISTRATION,
@@ -87,12 +90,13 @@ class LoginView(APIView):
                 metadata={"reason": "authentication_failed"},
             )
             raise
-        validated_data = cast(dict[str, Any], serializer.validated_data)
-        user = cast(
-            AbstractBaseUser,
-            validated_data["user"],
-            # pyrefly: ignore[not-a-type]
-        )
+        validated_data: object = serializer.validated_data
+        if not isinstance(validated_data, Mapping):
+            raise TypeError("Login serializer returned invalid data.")
+        user_value = validated_data.get("user")
+        if not isinstance(user_value, AbstractBaseUser):
+            raise TypeError("Login serializer did not return an authenticated user.")
+        user = user_value
 
         refresh = RefreshToken.for_user(user)
         record_audit_event(
@@ -236,64 +240,64 @@ class PasswordResetRequestView(views.APIView):
         )
 
 
+def _validate_reset_request(
+    token: object,
+    password: object,
+    password_confirm: object,
+) -> tuple[PasswordResetToken | None, str | list[str] | None]:
+    reset_record = None
+    error_message = None
+    if not isinstance(token, str) or not isinstance(password, str) or not password:
+        error_message = "Missing execution payload data parameters."
+    elif password != password_confirm:
+        error_message = "Password confirmations do not match."
+    else:
+        token_hash = PasswordResetToken.hash_token(token)
+        reset_record = PasswordResetToken.objects.filter(
+            token_hash=token_hash, is_used=False
+        ).first()
+        if reset_record is None or reset_record.is_expired:
+            reset_record = None
+            error_message = "Invalid, consumed, or expired signature token mapping."
+        else:
+            try:
+                validate_password(password)
+            except ValidationError as exc:
+                reset_record = None
+                error_message = exc.messages
+    return reset_record, error_message
+
+
 class PasswordResetConfirmView(views.APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "anon_password_reset_confirm"
 
     def post(self, request):
-        token = request.data.get("token")
         new_password = request.data.get("password")
-        password_confirm = request.data.get("password_confirm")
-
-        if not token or not new_password:
+        reset_record, error_message = _validate_reset_request(
+            request.data.get("token"),
+            request.data.get("password"),
+            request.data.get("password_confirm"),
+        )
+        if error_message is not None:
             return JsonResponse(
-                {"success": False, "message": "Missing execution payload data parameters."},
+                {"success": False, "message": error_message},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if new_password != password_confirm:
-            return JsonResponse(
-                {"success": False, "message": "Password confirmations do not match."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        target_hash = PasswordResetToken.hash_token(token)
-        reset_record = PasswordResetToken.objects.filter(
-            token_hash=target_hash, is_used=False
-        ).first()
-
-        if not reset_record or reset_record.is_expired:
-            return JsonResponse(
-                {
-                    "success": False,
-                    "message": "Invalid, consumed, or expired signature token mapping.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Validate security profile criteria constraints on new password
-        try:
-            validate_password(new_password)
-        except ValidationError as e:
-            return JsonResponse(
-                {"success": False, "message": list(e.messages)}, status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Execute updates safely
+        assert reset_record is not None
         with transaction.atomic():
             user = reset_record.user
             user.set_password(new_password)
             user.save()
-
             reset_record.is_used = True
             reset_record.save()
 
-            # INVALIDATION POLICY: Force terminate all active outstanding sessions / JWT instances for user
             tokens = OutstandingToken.objects.filter(user=user)
             revoked_count = 0
-            for t in tokens:
-                _, created = BlacklistedToken.objects.get_or_create(token=t)
+            for outstanding_token in tokens:
+                _, created = BlacklistedToken.objects.get_or_create(token=outstanding_token)
                 revoked_count += int(created)
 
             record_audit_event(

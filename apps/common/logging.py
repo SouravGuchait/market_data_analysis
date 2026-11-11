@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+
+type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
+
 
 _REQUEST_ID: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -55,20 +58,24 @@ _SENSITIVE_KEY_PARTS = (
 )
 
 
-def _safe_extra_value(key: str, value: Any) -> Any:
+def _safe_extra_value(key: str, value: object) -> JsonValue:
     """Redact sensitive structured fields, including nested mappings."""
 
     normalized_key = key.lower().replace("-", "_")
     if any(part in normalized_key for part in _SENSITIVE_KEY_PARTS):
-        return "[REDACTED]"
-    if isinstance(value, dict):
-        return {
+        result: JsonValue = "[REDACTED]"
+    elif isinstance(value, Mapping):
+        result = {
             str(child_key): _safe_extra_value(str(child_key), child_value)
             for child_key, child_value in value.items()
         }
-    if isinstance(value, (list, tuple)):
-        return [_safe_extra_value(key, item) for item in value]
-    return value
+    elif isinstance(value, (list, tuple)):
+        result = [_safe_extra_value(key, item) for item in value]
+    elif value is None or isinstance(value, (str, int, float, bool)):
+        result = value
+    else:
+        result = str(value)
+    return result
 
 
 def get_request_id() -> str:
@@ -102,12 +109,15 @@ class StructuredFormatter(logging.Formatter):
     """Render a log record as a single structured JSON object."""
 
     def format(self, record: logging.LogRecord) -> str:
-        payload: dict[str, Any] = {
+        request_id = getattr(record, "request_id", get_request_id())
+        if not isinstance(request_id, str):
+            request_id = get_request_id()
+        payload: dict[str, JsonValue] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
-            "request_id": getattr(record, "request_id", get_request_id()),
+            "request_id": request_id,
             "module": record.module,
             "process": record.process,
             "thread": record.thread,

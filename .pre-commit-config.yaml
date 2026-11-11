@@ -1,0 +1,23 @@
+# Pre-commit checks for the market data analytics backend.
+#
+# Enabled by running: pre-commit install
+#
+# Hooks use `language: system`, so they run the `ruff` executable from the
+# active virtual environment instead of downloading a separate copy. The
+# version therefore always matches `requirements-dev.txt`.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check --fix .
+        entry: ruff check --fix .
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false
+
+      - id: ruff-format-check
+        name: ruff format --check .
+        entry: ruff format --check .
+        language: system
+        types_or: [python, pyi]
+        pass_filenames: false

@@ -4,6 +4,7 @@ Environment variables are read once at import time.  Environment-specific
 modules (``development``, ``production``, ``test``) are responsible for
 providing safe defaults or failing fast when a required value is missing.
 """
+
 from __future__ import annotations
 
 import os
@@ -85,7 +86,7 @@ SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
 
-if not os.getenv("DEBUG", "True") == "True":
+if os.getenv("DEBUG", "True") != "True":
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
@@ -109,7 +110,7 @@ INSTALLED_APPS = [
     "apps.portfolios",
     "apps.analytics",
     "apps.audit",
-    'django_zxcvbn_password_validator',
+    "django_zxcvbn_password_validator",
 ]
 
 MIDDLEWARE = [
@@ -185,7 +186,7 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         # Enforces zxcvbn validation on the backend
-        'NAME': 'django_zxcvbn_password_validator.ZxcvbnPasswordValidator',
+        "NAME": "django_zxcvbn_password_validator.ZxcvbnPasswordValidator",
     },
 ]
 
@@ -220,12 +221,12 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.UserRateThrottle",
     ),
     "DEFAULT_THROTTLE_RATES": {
-        "anon_register": "5/min",                  # Max 5 registrations per minute per IP
-        "anon_login": "5/min",                     # Max 10 login attempts per minute per IP
-        "anon_token_refresh": "5/min",             # Max 5 token refreshes per minute per IP
-        "anon_password_reset": "3/min",             # Max 3 reset requests per minute per IP
-        "anon_password_reset_confirm": "3/min",     # Max 3 confirmation requests per minute per IP
-        "user_profile": "5/min",                  # High limit for logged-in users checking profiles
+        "anon_register": "5/min",  # Max 5 registrations per minute per IP
+        "anon_login": "5/min",  # Max 10 login attempts per minute per IP
+        "anon_token_refresh": "5/min",  # Max 5 token refreshes per minute per IP
+        "anon_password_reset": "3/min",  # Max 3 reset requests per minute per IP
+        "anon_password_reset_confirm": "3/min",  # Max 3 confirmation requests per minute per IP
+        "user_profile": "5/min",  # High limit for logged-in users checking profiles
         "user": "1000/hour",
     },
 }
@@ -233,8 +234,8 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
-    "ROTATE_REFRESH_TOKENS": True,          # Issue new refresh token on every refresh call
-    "BLACKLIST_AFTER_ROTATION": True,      # Blacklist the old refresh token
+    "ROTATE_REFRESH_TOKENS": True,  # Issue new refresh token on every refresh call
+    "BLACKLIST_AFTER_ROTATION": True,  # Blacklist the old refresh token
     "UPDATE_LAST_LOGIN": True,
     "AUTH_HEADER_TYPES": ("Bearer",),
 }

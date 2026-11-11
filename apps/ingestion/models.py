@@ -9,14 +9,17 @@ ingestion.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+
+type JsonValue = str | int | float | bool | None | list[JsonValue] | dict[str, JsonValue]
+
 
 SUPPORTED_FILE_FORMATS: tuple[str, ...] = ("csv", "json", "xlsx")
 DEFAULT_REQUIRED_STABLE_SCANS = 2
@@ -35,8 +38,10 @@ class StabilityPolicy:
     overlap_seconds: int = 0
 
 
-def _non_negative_int(policy: dict[str, Any], key: str, default: int) -> int:
+def _non_negative_int(policy: Mapping[str, object], key: str, default: int) -> int:
     raw = policy.get(key, default)
+    if not isinstance(raw, (int, float, str)):
+        raise IngestionConfigurationError(f"Stability policy field {key!r} must be an integer.")
     try:
         value = int(raw)
     except (TypeError, ValueError) as exc:
@@ -48,11 +53,14 @@ def _non_negative_int(policy: dict[str, Any], key: str, default: int) -> int:
     return value
 
 
-def resolve_stability_policy(raw: dict[str, Any] | None) -> StabilityPolicy:
+def resolve_stability_policy(raw: object) -> StabilityPolicy:
     """Return a validated policy, raising for an unusable configuration."""
 
-    policy = raw or {}
-    if not isinstance(policy, dict):
+    if raw is None:
+        policy: Mapping[str, object] = {}
+    elif isinstance(raw, Mapping):
+        policy = raw
+    else:
         raise IngestionConfigurationError("Stability policy must be a JSON object.")
 
     required_scans = _non_negative_int(
@@ -78,7 +86,7 @@ def default_stability_policy() -> dict[str, int]:
     return {"required_stable_scans": DEFAULT_REQUIRED_STABLE_SCANS}
 
 
-def default_mapping() -> dict[str, Any]:
+def default_mapping() -> dict[str, JsonValue]:
     return {}
 
 
@@ -110,6 +118,42 @@ class IngestionState(models.TextChoices):
     FAILED = "failed", "Failed"
     SKIPPED = "skipped", "Skipped"
     RETRYING = "retrying", "Retrying"
+
+
+def _validate_file_pattern(pattern: str) -> None:
+    pattern_path = Path(pattern)
+    if pattern_path.is_absolute() or ".." in pattern_path.parts:
+        raise ValidationError(
+            {"file_pattern": "File patterns cannot be absolute or traverse outside the location."}
+        )
+
+
+def _validate_location_reference(reference: str, backend: str) -> None:
+    if backend not in {StorageBackend.LOCAL, StorageBackend.EFS}:
+        return
+    location = Path(reference)
+    if location.is_absolute():
+        raise ValidationError(
+            {"location_reference": "Local locations must be relative to the configured root."}
+        )
+    if ".." in location.parts:
+        raise ValidationError(
+            {"location_reference": "Local locations cannot traverse outside the root."}
+        )
+
+
+def _validate_formats(formats: object) -> None:
+    if not isinstance(formats, list) or not formats:
+        raise ValidationError({"supported_formats": "Provide at least one supported file format."})
+    invalid_formats = {str(value).lower() for value in formats} - set(SUPPORTED_FILE_FORMATS)
+    if invalid_formats:
+        allowed = ", ".join(SUPPORTED_FILE_FORMATS)
+        invalid = ", ".join(sorted(invalid_formats))
+        raise ValidationError(
+            {
+                "supported_formats": f"Unsupported format(s): {invalid}. Supported formats: {allowed}."
+            }
+        )
 
 
 class IngestionRule(models.Model):
@@ -186,51 +230,16 @@ class IngestionRule(models.Model):
         super().clean()
         self.location_reference = (self.location_reference or "").strip()
         self.file_pattern = (self.file_pattern or "").strip()
-
         if not self.location_reference:
             raise ValidationError(
                 {"location_reference": "A storage location reference is required."}
             )
         if not self.file_pattern:
             raise ValidationError({"file_pattern": "A file pattern is required."})
-        pattern_path = Path(self.file_pattern)
-        if pattern_path.is_absolute() or ".." in pattern_path.parts:
-            raise ValidationError(
-                {
-                    "file_pattern": "File patterns cannot be absolute or traverse outside the location."
-                }
-            )
 
-        if self.storage_backend in {StorageBackend.LOCAL, StorageBackend.EFS}:
-            reference = Path(self.location_reference)
-            if reference.is_absolute():
-                raise ValidationError(
-                    {
-                        "location_reference": "Local locations must be relative to the configured root."
-                    }
-                )
-            if ".." in reference.parts:
-                raise ValidationError(
-                    {"location_reference": "Local locations cannot traverse outside the root."}
-                )
-
-        formats = self.supported_formats or []
-        if not isinstance(formats, list) or not formats:
-            raise ValidationError(
-                {"supported_formats": "Provide at least one supported file format."}
-            )
-        invalid_formats = {str(value).lower() for value in formats} - set(SUPPORTED_FILE_FORMATS)
-        if invalid_formats:
-            allowed = ", ".join(SUPPORTED_FILE_FORMATS)
-            raise ValidationError(
-                {
-                    "supported_formats": (
-                        f"Unsupported format(s): {', '.join(sorted(invalid_formats))}. "
-                        f"Supported formats: {allowed}."
-                    )
-                }
-            )
-
+        _validate_file_pattern(self.file_pattern)
+        _validate_location_reference(self.location_reference, self.storage_backend)
+        _validate_formats(self.supported_formats)
         try:
             resolve_stability_policy(self.stability_policy)
         except IngestionConfigurationError as exc:

@@ -145,6 +145,33 @@ class LocalStorageAdapter:
             backend=self.backend,
         )
 
+    def _list_matching_paths(self, pattern: str) -> list[Path]:
+        try:
+            return sorted(
+                self.location.glob(pattern),
+                key=lambda path: (
+                    path.name.casefold(),
+                    path.relative_to(self.location).as_posix().casefold(),
+                ),
+            )
+        except OSError as exc:
+            raise StorageUnavailableError("Unable to list the configured rule location.") from exc
+
+    def _eligible_objects(
+        self,
+        paths: Sequence[Path],
+        allowed_formats: set[str],
+    ) -> list[StorageObject]:
+        objects: list[StorageObject] = []
+        for path in paths:
+            if not path.is_file():
+                continue
+            if not path.resolve().is_relative_to(self.location):
+                raise StoragePathError("Discovered object escapes the configured rule location.")
+            if path.suffix.lower().lstrip(".") in allowed_formats:
+                objects.append(self._as_object(path))
+        return objects
+
     def list_objects(
         self,
         *,
@@ -157,32 +184,11 @@ class LocalStorageAdapter:
             raise StoragePathError(
                 "File patterns cannot be empty, absolute or traverse outside the location."
             )
-
-        allowed_formats = {str(value).lower().lstrip(".") for value in formats}
+        allowed_formats = {value.lower().lstrip(".") for value in formats}
         if not allowed_formats:
             return []
-
-        try:
-            paths = sorted(
-                self.location.glob(pattern),
-                key=lambda path: (
-                    path.name.casefold(),
-                    path.relative_to(self.location).as_posix().casefold(),
-                ),
-            )
-        except OSError as exc:
-            raise StorageUnavailableError("Unable to list the configured rule location.") from exc
-
-        objects: list[StorageObject] = []
-        for path in paths:
-            if not path.is_file():
-                continue
-            if not path.resolve().is_relative_to(self.location):
-                raise StoragePathError("Discovered object escapes the configured rule location.")
-            if path.suffix.lower().lstrip(".") not in allowed_formats:
-                continue
-            objects.append(self._as_object(path))
-        return objects
+        paths = self._list_matching_paths(pattern)
+        return self._eligible_objects(paths, allowed_formats)
 
     def stat(self, key: str) -> StorageObject:
         self._ensure_location()

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -101,10 +100,10 @@ class AuditEvent(models.Model):
     def __str__(self) -> str:
         return f"{self.action} {self.resource_type}:{self.resource_id}".strip()
 
-    def save(self, *args: Any, **kwargs: Any) -> None:
+    def save(self, *args: object, **kwargs: object) -> None:
         if not self._state.adding:
             raise ValidationError("Audit events are append-only and cannot be updated.")
         super().save(*args, **kwargs)
 
-    def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
+    def delete(self, *args: object, **kwargs: object) -> tuple[int, dict[str, int]]:
         raise ValidationError("Audit events cannot be deleted through application code.")

@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, and **Scheduled File Discovery and Ingestion**. Tick parsing, worker processing, and analytics calculations remain future features.
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Scheduled File Discovery and Ingestion**, and the **tick parser layer**. Worker persistence, tick-to-candle aggregation, and analytics calculations remain future features.
 
 ## Implemented features
 
@@ -186,8 +186,38 @@ system-attributed audit events (`ingestion_started`, `ingestion_completed`,
 `ingestion_failed`). Rule changes made in Django admin are attributed to the
 authenticated administrator.
 
-The per-file Celery task is the worker boundary; parsing, validation and tick
-persistence are implemented by the later ingestion-worker feature.
+The per-file Celery task remains a worker boundary. Parsing and validation are
+provided by the feature_006 parser layer below; database persistence and
+tick-to-candle aggregation belong to the later ingestion-worker feature.
+
+### Feature 006: Tick file parsing and validation
+
+`apps.ingestion.parsers.iter_file_records` selects a parser by file extension
+and yields either a normalized `TickRecord` or a traceable `RowRejection`.
+`iter_file_batches` groups these results into bounded batches for a worker.
+CSV uses pandas `read_csv` with `chunksize`; JSON supports explicitly configured
+root arrays (streamed with ijson) and JSON Lines; XLSX reads rows with
+openpyxl's read-only mode. The ijson dependency streams JSON array entries
+without loading the full document. No parser loads the entire input into a DataFrame.
+
+Every ingestion rule's `schema_mapping` must contain a `columns` object mapping
+canonical names to source headings. The required canonical fields are
+`instrument_identifier`, `exchange_identifier`, `event_timestamp`, `price`,
+and `quantity`; optional fields are `exchange_trade_id`, `sequence_number`, and
+`side`. Format-specific settings are nested under `csv`, `json`, or `xlsx`.
+JSON requires `json.mode` (`array` or `jsonl`); XLSX requires `xlsx.worksheet`.
+Naive timestamps require `source_timezone`; ambiguous daylight-saving times
+also require `ambiguous_time_fold`. Numeric bounds and decimal precision can be
+configured in `schema_mapping`. Fallback deduplication is performed only when
+`deduplication_fields` is explicitly configured; no trade IDs are invented. A
+bounded rolling identity cache detects nearby duplicates; database uniqueness
+across the full ingestion lifecycle belongs to the worker persistence feature.
+The cache defaults to 10,000 identities and can be changed with
+`deduplication_cache_size` (maximum 100,000).
+
+Parsers are library-level services and do not write ticks or alter the Celery
+task lifecycle. Feature 007 will connect parsing outcomes to persisted tick
+records and ingestion state transitions.
 
 ## Project layout
 

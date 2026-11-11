@@ -16,6 +16,8 @@ redis>=5.0,<7.0
 numpy>=1.26,<2.0
 pandas>=2.0,<3.0
 openpyxl>=3.1,<4.0
+types_openpyxl>=3.1,<4.0
+ijson>=3.3,<4.0
 
 # Production serving
 gunicorn>=23.0,<24.0

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from django.conf import settings
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
@@ -21,9 +19,9 @@ def _response_payload(
     *,
     success: bool,
     message: str,
-    data: dict[str, Any],
+    data: dict[str, object],
     errors: dict[str, list[str]] | None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     return {
         "success": success,
         "message": message,

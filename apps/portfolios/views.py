@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, cast
+from collections.abc import Mapping
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import transaction
@@ -41,7 +41,7 @@ from apps.portfolios.services import (
 
 def success(
     message: str,
-    data: Any = None,
+    data: object = None,
     status_code: int = status.HTTP_200_OK,
 ) -> Response:
     return Response(
@@ -52,7 +52,7 @@ def success(
 
 def failure(
     message: str,
-    errors: Any,
+    errors: object,
     status_code: int = status.HTTP_400_BAD_REQUEST,
 ) -> Response:
     return Response(
@@ -88,7 +88,7 @@ class PortfolioListCreateView(PortfolioAPIView):
         if not serializer.is_valid():
             return failure("Validation failed", serializer.errors)
 
-        validated_data = cast(dict[str, Any], serializer.validated_data)
+        validated_data = _validated_mapping(serializer.validated_data)
         with transaction.atomic():
             portfolio = create_portfolio(owner=request.user, data=validated_data)
             record_audit_event(
@@ -123,7 +123,7 @@ class PortfolioDetailView(PortfolioAPIView):
         if not serializer.is_valid():
             return failure("Validation failed", serializer.errors)
 
-        validated_data = cast(dict[str, Any], serializer.validated_data)
+        validated_data = _validated_mapping(serializer.validated_data)
         changed_fields = sorted(validated_data)
         with transaction.atomic():
             portfolio = update_portfolio(portfolio, validated_data)
@@ -164,7 +164,6 @@ class PortfolioInstrumentListCreateView(PortfolioAPIView):
         portfolio = self.get_owned_portfolio(request, portfolio_id)
         if portfolio is None:
             return portfolio_not_found()
-
         queryset = list_portfolio_instruments(portfolio)
         paginator = PortfolioPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
@@ -175,13 +174,22 @@ class PortfolioInstrumentListCreateView(PortfolioAPIView):
     def post(self, request: Request, portfolio_id: uuid.UUID) -> Response:
         portfolio = self.get_owned_portfolio(request, portfolio_id)
         if portfolio is None:
-            return portfolio_not_found()
+            response = portfolio_not_found()
+        else:
+            serializer = PortfolioInstrumentWriteSerializer(data=request.data)
+            if not serializer.is_valid():
+                response = failure("Validation failed", serializer.errors)
+            else:
+                validated_data = _validated_mapping(serializer.validated_data)
+                response = self._create_portfolio_instrument(request, portfolio, validated_data)
+        return response
 
-        serializer = PortfolioInstrumentWriteSerializer(data=request.data)
-        if not serializer.is_valid():
-            return failure("Validation failed", serializer.errors)
-
-        validated_data = cast(dict[str, Any], serializer.validated_data)
+    @staticmethod
+    def _create_portfolio_instrument(
+        request: Request,
+        portfolio: Portfolio,
+        validated_data: dict[str, object],
+    ) -> Response:
         try:
             with transaction.atomic():
                 portfolio_instrument = add_portfolio_instrument(portfolio, validated_data)
@@ -206,7 +214,6 @@ class PortfolioInstrumentListCreateView(PortfolioAPIView):
             )
         except DjangoValidationError as exc:
             return failure("Validation failed", exc.message_dict)
-
         return success(
             "Portfolio instrument created",
             PortfolioInstrumentReadSerializer(portfolio_instrument).data,
@@ -221,7 +228,6 @@ class PortfolioInstrumentDetailView(PortfolioAPIView):
         portfolio = self.get_owned_portfolio(request, portfolio_id)
         if portfolio is None:
             return portfolio_not_found()
-
         portfolio_instrument = get_portfolio_instrument(portfolio, portfolio_instrument_id)
         if portfolio_instrument is None:
             return failure(
@@ -229,7 +235,6 @@ class PortfolioInstrumentDetailView(PortfolioAPIView):
                 {"detail": ["Not found."]},
                 status.HTTP_404_NOT_FOUND,
             )
-
         membership_id = portfolio_instrument.pk
         metadata = {
             "portfolio_id": str(portfolio.pk),
@@ -248,3 +253,9 @@ class PortfolioInstrumentDetailView(PortfolioAPIView):
                 metadata=metadata,
             )
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+def _validated_mapping(data: object) -> dict[str, object]:
+    if not isinstance(data, Mapping):
+        raise TypeError("Validated serializer data must be a mapping.")
+    return {key: value for key, value in data.items() if isinstance(key, str)}

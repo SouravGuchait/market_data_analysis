@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
 
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.db.models import Prefetch, QuerySet
 
 from apps.portfolios.models import Portfolio, PortfolioInstrument
 
 
-def _portfolio_queryset(owner: Any) -> QuerySet[Portfolio]:
+def _portfolio_queryset(owner: AbstractBaseUser) -> QuerySet[Portfolio]:
     """Return only the authenticated user's portfolios with serializer relations loaded."""
 
     portfolio_instruments = PortfolioInstrument.objects.select_related(
@@ -24,11 +24,11 @@ def _portfolio_queryset(owner: Any) -> QuerySet[Portfolio]:
     )
 
 
-def list_user_portfolios(owner: Any) -> QuerySet[Portfolio]:
+def list_user_portfolios(owner: AbstractBaseUser) -> QuerySet[Portfolio]:
     return _portfolio_queryset(owner)
 
 
-def get_user_portfolio(owner: Any, portfolio_id: uuid.UUID) -> Portfolio | None:
+def get_user_portfolio(owner: AbstractBaseUser, portfolio_id: uuid.UUID) -> Portfolio | None:
     """Fetch one owned portfolio, or ``None`` for a missing or foreign portfolio."""
 
     return _portfolio_queryset(owner).filter(pk=portfolio_id).first()

@@ -139,9 +139,7 @@ def test_multiple_formats_are_listed_stabilized_and_dispatched_independently(
     assert first.queued == 0
     assert IngestionObjectState.objects.filter(rule=rule).count() == 12
     assert set(
-        IngestionObjectState.objects.filter(rule=rule).values_list(
-            "stable_scan_count", flat=True
-        )
+        IngestionObjectState.objects.filter(rule=rule).values_list("stable_scan_count", flat=True)
     ) == {1}
     rule.refresh_from_db()
     assert rule.last_scan_watermark == base + timedelta(seconds=1)
@@ -174,22 +172,31 @@ def test_multiple_formats_are_listed_stabilized_and_dispatched_independently(
     assert all(ingestion.state == IngestionState.QUEUED for ingestion in ingestions)
     assert all(ingestion.celery_task_id for ingestion in ingestions)
     assert dispatched == sorted(names, key=str.casefold)
-    assert IngestionStateTransition.objects.filter(
-        ingestion__rule=rule,
-        from_state="",
-        to_state=IngestionState.DISCOVERED,
-    ).count() == 12
-    assert IngestionStateTransition.objects.filter(
-        ingestion__rule=rule,
-        from_state=IngestionState.DISCOVERED,
-        to_state=IngestionState.QUEUED,
-    ).count() == 12
-    assert AuditEvent.objects.filter(
-        action=AuditAction.INGESTION_STARTED,
-        status=AuditStatus.ACCEPTED,
-        resource_id__in=[str(ingestion.pk) for ingestion in ingestions],
-        metadata__system=True,
-    ).count() == 12
+    assert (
+        IngestionStateTransition.objects.filter(
+            ingestion__rule=rule,
+            from_state="",
+            to_state=IngestionState.DISCOVERED,
+        ).count()
+        == 12
+    )
+    assert (
+        IngestionStateTransition.objects.filter(
+            ingestion__rule=rule,
+            from_state=IngestionState.DISCOVERED,
+            to_state=IngestionState.QUEUED,
+        ).count()
+        == 12
+    )
+    assert (
+        AuditEvent.objects.filter(
+            action=AuditAction.INGESTION_STARTED,
+            status=AuditStatus.ACCEPTED,
+            resource_id__in=[str(ingestion.pk) for ingestion in ingestions],
+            metadata__system=True,
+        ).count()
+        == 12
+    )
 
 
 @pytest.mark.django_db

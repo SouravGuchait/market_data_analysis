@@ -6,9 +6,10 @@ filesystem paths, and ingestion records are read-only in the admin.
 
 from __future__ import annotations
 
-from typing import Any
-
 from django.contrib import admin
+from django.db.models import Model
+from django.forms import ModelForm
+from django.http import HttpRequest
 
 from apps.audit.models import AuditAction, AuditResourceType, AuditStatus
 from apps.audit.services import record_audit_event
@@ -48,9 +49,9 @@ class IngestionRuleAdmin(admin.ModelAdmin):
 
     def save_model(
         self,
-        request: Any,
+        request: HttpRequest,
         obj: IngestionRule,
-        form: Any,
+        form: ModelForm[IngestionRule],
         change: bool,
     ) -> None:
         super().save_model(request, obj, form, change)
@@ -69,7 +70,7 @@ class IngestionRuleAdmin(admin.ModelAdmin):
             },
         )
 
-    def delete_model(self, request: Any, obj: IngestionRule) -> None:
+    def delete_model(self, request: HttpRequest, obj: IngestionRule) -> None:
         rule_id = obj.pk
         rule_name = obj.name
         super().delete_model(request, obj)
@@ -101,13 +102,13 @@ class IngestionAdmin(admin.ModelAdmin):
     search_fields = ("file_name", "object_key", "content_hash", "celery_task_id")
     readonly_fields = tuple(field.name for field in Ingestion._meta.fields)
 
-    def has_add_permission(self, request: Any) -> bool:
+    def has_add_permission(self, request: HttpRequest) -> bool:
         return False
 
-    def has_change_permission(self, request: Any, obj: Any = None) -> bool:
+    def has_change_permission(self, request: HttpRequest, obj: Model | None = None) -> bool:
         return False
 
-    def has_delete_permission(self, request: Any, obj: Any = None) -> bool:
+    def has_delete_permission(self, request: HttpRequest, obj: Model | None = None) -> bool:
         return False
 
 
@@ -118,13 +119,13 @@ class IngestionStateTransitionAdmin(admin.ModelAdmin):
     search_fields = ("ingestion__file_name", "reason")
     readonly_fields = tuple(field.name for field in IngestionStateTransition._meta.fields)
 
-    def has_add_permission(self, request: Any) -> bool:
+    def has_add_permission(self, request: HttpRequest) -> bool:
         return False
 
-    def has_change_permission(self, request: Any, obj: Any = None) -> bool:
+    def has_change_permission(self, request: HttpRequest, obj: Model | None = None) -> bool:
         return False
 
-    def has_delete_permission(self, request: Any, obj: Any = None) -> bool:
+    def has_delete_permission(self, request: HttpRequest, obj: Model | None = None) -> bool:
         return False
 
 
@@ -142,11 +143,11 @@ class IngestionObjectStateAdmin(admin.ModelAdmin):
     search_fields = ("object_key", "object_name", "last_content_hash")
     readonly_fields = tuple(field.name for field in IngestionObjectState._meta.fields)
 
-    def has_add_permission(self, request: Any) -> bool:
+    def has_add_permission(self, request: HttpRequest) -> bool:
         return False
 
-    def has_change_permission(self, request: Any, obj: Any = None) -> bool:
+    def has_change_permission(self, request: HttpRequest, obj: Model | None = None) -> bool:
         return False
 
-    def has_delete_permission(self, request: Any, obj: Any = None) -> bool:
+    def has_delete_permission(self, request: HttpRequest, obj: Model | None = None) -> bool:
         return False

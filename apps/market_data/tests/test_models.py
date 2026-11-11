@@ -1,10 +1,10 @@
 """Model and row-mapping coverage for Feature 002.5."""
 
-from datetime import UTC, date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
-from django.contrib.auth import get_user_model
+from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
@@ -37,10 +37,10 @@ def test_daily_ohlcv_unique_per_instrument_and_day(instrument):
         instrument=instrument,
         trading_date=date(2024, 1, 2),
         timestamp=timezone.now(),
-        open=Decimal("10"),
-        high=Decimal("12"),
-        low=Decimal("9"),
-        close=Decimal("11"),
+        open=Decimal(10),
+        high=Decimal(12),
+        low=Decimal(9),
+        close=Decimal(11),
         volume=5,
     )
     assert candle.instrument == instrument
@@ -74,7 +74,7 @@ def test_same_symbol_can_exist_on_different_exchanges(instrument):
 
 @pytest.mark.django_db
 def test_two_users_can_reference_the_same_instrument(instrument):
-    user_model = get_user_model()
+    user_model = User
     first = Portfolio.objects.create(
         owner=user_model.objects.create_user(username="first"), name="First"
     )
@@ -88,7 +88,7 @@ def test_two_users_can_reference_the_same_instrument(instrument):
 
 @pytest.mark.django_db
 def test_portfolio_shares_instrument_and_rejects_duplicate_membership(instrument):
-    user = get_user_model().objects.create_user(username="owner", password="test")
+    user = User.objects.create_user(username="owner", password="test")
     portfolio = Portfolio.objects.create(owner=user, name="Main")
     PortfolioInstrument.objects.create(portfolio=portfolio, instrument=instrument)
     assert list(portfolio.instruments.all()) == [instrument]
@@ -98,7 +98,7 @@ def test_portfolio_shares_instrument_and_rejects_duplicate_membership(instrument
 
 @pytest.mark.django_db
 def test_mapping_creates_instrument_and_daily_candle(exchange):
-    timestamp = timezone.datetime(2024, 1, 2, 21, tzinfo=UTC)
+    timestamp = datetime(2024, 1, 2, 21, tzinfo=UTC)
     row = {
         "exchange": exchange.code,
         "symbol": "ACME",

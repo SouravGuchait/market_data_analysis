@@ -1,4 +1,3 @@
-# pyright: reportAny=false, reportExplicitAny=false
 """Deterministic synthetic market-data generator for development and testing.
 
 Generates clean and intentionally dirty fixtures in CSV, JSON, and XLSX with a
@@ -23,7 +22,6 @@ import logging
 import math
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -33,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 # One market-data row. Values are deliberately loose: dirty fixtures hold
 # strings, None, or missing keys where clean rows hold numbers.
-Row = dict[str, Any]
+Row = dict[str, object]
 
 EXCHANGES = [
     ("XNYS", "New York Stock Exchange", "America/New_York"),

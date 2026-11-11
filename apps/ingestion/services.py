@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
 from uuid import UUID
 
 from django.db import IntegrityError, transaction
@@ -26,6 +25,7 @@ from .models import (
     IngestionRule,
     IngestionState,
     IngestionStateTransition,
+    JsonValue,
     ScanStatus,
     StabilityPolicy,
     resolve_stability_policy,
@@ -60,7 +60,19 @@ class RuleScanResult:
     message: str = ""
     failed_objects: list[str] = field(default_factory=list)
 
-    def as_dict(self) -> dict[str, Any]:
+    def add_outcome(self, outcome: str) -> None:
+        counters = {
+            "queued": "queued",
+            "requeued": "requeued",
+            "duplicate": "duplicates",
+            "unstable": "unstable",
+            "historical": "historical",
+        }
+        field_name = counters.get(outcome)
+        if field_name is not None:
+            setattr(self, field_name, getattr(self, field_name) + 1)
+
+    def as_dict(self) -> dict[str, JsonValue]:
         return {
             "rule_id": self.rule_id,
             "rule_name": self.rule_name,
@@ -82,7 +94,7 @@ def _safe_message(exc: BaseException) -> str:
     return (message or type(exc).__name__)[:_MAX_ERROR_LENGTH]
 
 
-def _set_rule_scan_state(rule: IngestionRule, **fields: Any) -> None:
+def _set_rule_scan_state(rule: IngestionRule, **fields: object) -> None:
     for name, value in fields.items():
         setattr(rule, name, value)
     rule.save(update_fields=[*fields, "updated_at"])
@@ -94,7 +106,7 @@ def _record_transition(
     from_state: str,
     to_state: str,
     reason: str = "",
-    metadata: dict[str, Any] | None = None,
+    metadata: dict[str, JsonValue] | None = None,
 ) -> None:
     IngestionStateTransition.objects.create(
         ingestion=ingestion,
@@ -173,26 +185,24 @@ def _is_candidate(
 ) -> bool:
     """Avoid re-hashing objects already processed at the same metadata."""
 
-    if not state.last_processed_content_hash or state.last_processed_modified_at is None:
-        return True
-    if obj.modified_at > state.last_processed_modified_at:
-        return True
-
-    latest_state = (
-        Ingestion.objects.filter(rule=rule, object_key=obj.key)
-        .order_by("-created_at")
-        .values_list("state", flat=True)
-        .first()
+    changed = (
+        not state.last_processed_content_hash
+        or state.last_processed_modified_at is None
+        or obj.modified_at > state.last_processed_modified_at
     )
-    if latest_state in _REQUEUEABLE_STATES:
-        return True
-
+    latest_state = None
+    if not changed:
+        latest_state = (
+            Ingestion.objects.filter(rule=rule, object_key=obj.key)
+            .order_by("-created_at")
+            .values_list("state", flat=True)
+            .first()
+        )
     watermark = rule.last_scan_watermark
-    if watermark is None:
-        return False
-
-    earliest = watermark - timedelta(seconds=policy.overlap_seconds)
-    return obj.modified_at >= earliest
+    within_overlap = watermark is not None and obj.modified_at >= (
+        watermark - timedelta(seconds=policy.overlap_seconds)
+    )
+    return changed or latest_state in _REQUEUEABLE_STATES or within_overlap
 
 
 def _mark_state_processed(
@@ -328,30 +338,22 @@ def _existing_ingestion_outcome(
     return "duplicate", None
 
 
-def _process_object(
+def _observe_object(
     rule: IngestionRule,
-    adapter: StorageAdapter,
     obj: StorageObject,
-    *,
     now: datetime,
-    policy: StabilityPolicy,
-) -> tuple[str, UUID | None]:
+) -> tuple[IngestionObjectState, bool]:
     state, created = IngestionObjectState.objects.get_or_create(
         rule=rule,
         object_key=obj.key,
-        defaults={
-            "object_name": obj.name,
-            "first_seen_at": now,
-            "last_seen_at": now,
-        },
+        defaults={"object_name": obj.name, "first_seen_at": now, "last_seen_at": now},
     )
-    state.object_name = obj.name
-
     same_snapshot = (
         state.stable_scan_count > 0
         and state.observed_size_bytes == obj.size_bytes
         and state.observed_modified_at == obj.modified_at
     )
+    state.object_name = obj.name
     state.stable_scan_count = state.stable_scan_count + 1 if same_snapshot else 1
     state.observed_size_bytes = obj.size_bytes
     state.observed_modified_at = obj.modified_at
@@ -366,64 +368,196 @@ def _process_object(
             "updated_at",
         ]
     )
+    return state, created
 
-    if obj.modified_at <= _baseline_watermark(rule) and not state.last_processed_content_hash:
-        if created or state.is_historical:
-            if not state.is_historical:
-                state.is_historical = True
-                state.save(update_fields=["is_historical", "updated_at"])
-            return "historical", None
 
-    if state.is_historical:
+@dataclass(frozen=True)
+class ObjectScanContext:
+    created: bool
+    now: datetime
+    policy: StabilityPolicy
+
+
+def _preflight_object(
+    rule: IngestionRule,
+    state: IngestionObjectState,
+    obj: StorageObject,
+    context: ObjectScanContext,
+) -> str | None:
+    outcome = None
+    historical = obj.modified_at <= _baseline_watermark(rule)
+    if (
+        historical
+        and not state.last_processed_content_hash
+        and (context.created or state.is_historical)
+    ):
+        state.is_historical = True
+        state.save(update_fields=["is_historical", "updated_at"])
+        outcome = "historical"
+    elif state.is_historical:
         state.is_historical = False
         state.save(update_fields=["is_historical", "updated_at"])
 
-    if state.stable_scan_count < policy.required_stable_scans:
-        return "unstable", None
+    if outcome is None:
+        too_new = state.stable_scan_count < context.policy.required_stable_scans
+        too_recent = (
+            context.now - obj.modified_at
+        ).total_seconds() < context.policy.min_file_age_seconds
+        if too_new or too_recent:
+            outcome = "unstable"
+        elif not _is_candidate(rule, state, obj, context.policy):
+            outcome = "duplicate"
+    return outcome
 
-    file_age_seconds = (now - obj.modified_at).total_seconds()
-    if file_age_seconds < policy.min_file_age_seconds:
-        return "unstable", None
 
-    if not _is_candidate(rule, state, obj, policy):
-        return "duplicate", None
+def _verify_stable_snapshot(
+    state: IngestionObjectState,
+    obj: StorageObject,
+    adapter: StorageAdapter,
+    now: datetime,
+) -> str | None:
+    current = adapter.stat(obj.key)
+    if current.size_bytes == obj.size_bytes and current.modified_at == obj.modified_at:
+        return None
+    state.stable_scan_count = 1
+    state.observed_size_bytes = current.size_bytes
+    state.observed_modified_at = current.modified_at
+    state.last_seen_at = now
+    state.save(
+        update_fields=[
+            "stable_scan_count",
+            "observed_size_bytes",
+            "observed_modified_at",
+            "last_seen_at",
+            "updated_at",
+        ]
+    )
+    return "unstable"
 
-    content_hash = adapter.content_hash(obj.key)
-    after_hash = adapter.stat(obj.key)
-    if after_hash.size_bytes != obj.size_bytes or after_hash.modified_at != obj.modified_at:
-        state.stable_scan_count = 1
-        state.observed_size_bytes = after_hash.size_bytes
-        state.observed_modified_at = after_hash.modified_at
-        state.last_seen_at = now
-        state.save(
-            update_fields=[
-                "stable_scan_count",
-                "observed_size_bytes",
-                "observed_modified_at",
-                "last_seen_at",
-                "updated_at",
-            ]
-        )
-        return "unstable", None
 
+def _create_or_requeue(
+    rule: IngestionRule,
+    state: IngestionObjectState,
+    obj: StorageObject,
+    content_hash: str,
+    now: datetime,
+) -> tuple[str, UUID | None]:
     existing_outcome, ingestion_id = _existing_ingestion_outcome(
         rule, state, obj, content_hash, now
     )
     if existing_outcome:
         return existing_outcome, ingestion_id
-
     try:
         ingestion = _create_ingestion(rule, obj, content_hash)
     except IntegrityError:
-        # A concurrent scan won the unique constraint; treat the object as a duplicate.
         logger.warning(
             "Ingestion record already exists after a concurrent discovery.",
             extra={"rule_id": str(rule.pk), "object_key": obj.key},
         )
         _mark_state_processed(state, obj, content_hash, now)
         return "duplicate", None
-
     return "queued", ingestion.pk
+
+
+def _process_object(
+    rule: IngestionRule,
+    adapter: StorageAdapter,
+    obj: StorageObject,
+    *,
+    now: datetime,
+    policy: StabilityPolicy,
+) -> tuple[str, UUID | None]:
+    state, created = _observe_object(rule, obj, now)
+    outcome = _preflight_object(
+        rule,
+        state,
+        obj,
+        ObjectScanContext(created=created, now=now, policy=policy),
+    )
+    if outcome is not None:
+        return outcome, None
+
+    content_hash = adapter.content_hash(obj.key)
+    if _verify_stable_snapshot(state, obj, adapter, now) is not None:
+        return "unstable", None
+    return _create_or_requeue(rule, state, obj, content_hash, now)
+
+
+def _inspect_objects(
+    result: RuleScanResult,
+    rule: IngestionRule,
+    adapter: StorageAdapter,
+    objects: list[StorageObject],
+    context: ObjectScanContext,
+) -> None:
+    for obj in objects:
+        try:
+            outcome, _ = _process_object(rule, adapter, obj, now=context.now, policy=context.policy)
+        except Exception as exc:
+            result.errors += 1
+            if len(result.failed_objects) < _MAX_FAILED_OBJECTS:
+                result.failed_objects.append(obj.key)
+            logger.exception(
+                "Failed to inspect one ingestion object.",
+                extra={
+                    "rule_id": str(rule.pk),
+                    "rule_name": rule.name,
+                    "object_key": obj.key,
+                    "error_category": type(exc).__name__,
+                },
+            )
+            continue
+        result.add_outcome(outcome)
+
+
+def _complete_scan(rule: IngestionRule, result: RuleScanResult, started_at: datetime) -> None:
+    completed_at = timezone.now()
+    if result.errors:
+        result.status = ScanStatus.FAILED.value
+        result.message = "One or more objects could not be inspected."
+        _set_rule_scan_state(
+            rule,
+            last_scan_completed_at=completed_at,
+            last_scan_status=ScanStatus.FAILED,
+            last_scan_error=result.message,
+            last_scan_summary=result.as_dict(),
+        )
+    else:
+        result.status = ScanStatus.SUCCESS.value
+        result.message = "Scan completed."
+        _set_rule_scan_state(
+            rule,
+            last_scan_completed_at=completed_at,
+            last_scan_status=ScanStatus.SUCCESS,
+            last_scan_error="",
+            last_scan_summary=result.as_dict(),
+            last_scan_watermark=started_at,
+        )
+    _audit_scan_finished(rule, result)
+
+
+def _fail_scan(rule: IngestionRule, result: RuleScanResult, exc: Exception) -> None:
+    completed_at = timezone.now()
+    result.status = ScanStatus.FAILED.value
+    result.errors += 1
+    result.message = _safe_message(exc)
+    _set_rule_scan_state(
+        rule,
+        last_scan_completed_at=completed_at,
+        last_scan_status=ScanStatus.FAILED,
+        last_scan_error=result.message,
+        last_scan_summary=result.as_dict(),
+    )
+    logger.exception(
+        "Ingestion rule scan failed.",
+        extra={
+            "rule_id": str(rule.pk),
+            "rule_name": rule.name,
+            "storage_backend": rule.storage_backend,
+            "error_category": type(exc).__name__,
+        },
+    )
+    _audit_scan_finished(rule, result)
 
 
 def scan_ingestion_rule(
@@ -439,9 +573,7 @@ def scan_ingestion_rule(
 
     started_at = now or timezone.now()
     result = RuleScanResult(
-        rule_id=str(rule.pk),
-        rule_name=rule.name,
-        status=ScanStatus.RUNNING.value,
+        rule_id=str(rule.pk), rule_name=rule.name, status=ScanStatus.RUNNING.value
     )
     _set_rule_scan_state(
         rule,
@@ -454,95 +586,19 @@ def scan_ingestion_rule(
     try:
         policy = resolve_stability_policy(rule.stability_policy)
         adapter = get_storage_adapter(rule.storage_backend, rule.location_reference)
-        objects = adapter.list_objects(
-            pattern=rule.file_pattern,
-            formats=rule.supported_formats,
-        )
+        objects = adapter.list_objects(pattern=rule.file_pattern, formats=rule.supported_formats)
         result.listed = len(objects)
-
-        for obj in objects:
-            try:
-                outcome, _ingestion_id = _process_object(
-                    rule,
-                    adapter,
-                    obj,
-                    now=started_at,
-                    policy=policy,
-                )
-            except Exception as exc:
-                result.errors += 1
-                if len(result.failed_objects) < _MAX_FAILED_OBJECTS:
-                    result.failed_objects.append(obj.key)
-                logger.exception(
-                    "Failed to inspect one ingestion object.",
-                    extra={
-                        "rule_id": str(rule.pk),
-                        "rule_name": rule.name,
-                        "object_key": obj.key,
-                        "error_category": type(exc).__name__,
-                    },
-                )
-                continue
-
-            if outcome == "queued":
-                result.queued += 1
-            elif outcome == "requeued":
-                result.requeued += 1
-            elif outcome == "duplicate":
-                result.duplicates += 1
-            elif outcome == "unstable":
-                result.unstable += 1
-            elif outcome == "historical":
-                result.historical += 1
-
-        completed_at = timezone.now()
-        if result.errors:
-            result.status = ScanStatus.FAILED.value
-            result.message = "One or more objects could not be inspected."
-            _set_rule_scan_state(
-                rule,
-                last_scan_completed_at=completed_at,
-                last_scan_status=ScanStatus.FAILED,
-                last_scan_error=result.message,
-                last_scan_summary=result.as_dict(),
-            )
-        else:
-            result.status = ScanStatus.SUCCESS.value
-            result.message = "Scan completed."
-            _set_rule_scan_state(
-                rule,
-                last_scan_completed_at=completed_at,
-                last_scan_status=ScanStatus.SUCCESS,
-                last_scan_error="",
-                last_scan_summary=result.as_dict(),
-                last_scan_watermark=started_at,
-            )
-        _audit_scan_finished(rule, result)
-        return result
-
-    except Exception as exc:
-        completed_at = timezone.now()
-        result.status = ScanStatus.FAILED.value
-        result.errors += 1
-        result.message = _safe_message(exc)
-        _set_rule_scan_state(
+        _inspect_objects(
+            result,
             rule,
-            last_scan_completed_at=completed_at,
-            last_scan_status=ScanStatus.FAILED,
-            last_scan_error=result.message,
-            last_scan_summary=result.as_dict(),
+            adapter,
+            objects,
+            ObjectScanContext(created=False, now=started_at, policy=policy),
         )
-        logger.exception(
-            "Ingestion rule scan failed.",
-            extra={
-                "rule_id": str(rule.pk),
-                "rule_name": rule.name,
-                "storage_backend": rule.storage_backend,
-                "error_category": type(exc).__name__,
-            },
-        )
-        _audit_scan_finished(rule, result)
-        return result
+        _complete_scan(rule, result, started_at)
+    except Exception as exc:
+        _fail_scan(rule, result, exc)
+    return result
 
 
 def scan_enabled_rules(
@@ -608,10 +664,15 @@ def dispatch_ingestion(ingestion_id: UUID) -> None:
         return
 
     try:
-        from .tasks import process_ingestion_file
+        from celery._state import get_current_app
 
-        process_task: Any = process_ingestion_file
-        async_result = process_task.delay(str(ingestion.pk))
+        app = get_current_app()
+        if app is None:
+            raise RuntimeError("Celery application is not available.")
+        task = app.tasks.get("apps.ingestion.tasks.process_ingestion_file")
+        if task is None:
+            raise RuntimeError("Ingestion worker task is not registered.")
+        async_result = task.apply_async(args=[str(ingestion.pk)])
     except Exception as exc:
         logger.exception(
             "Unable to dispatch ingestion task.",

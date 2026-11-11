@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any, cast
 
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -18,14 +17,14 @@ from .selectors import filter_audit_events, get_visible_audit_event, list_visibl
 from .serializers import AuditEventFilterSerializer, AuditEventReadSerializer
 
 
-def success(message: str, data: Any = None) -> Response:
+def success(message: str, data: object = None) -> Response:
     return Response(
         {"success": True, "message": message, "data": data, "errors": None},
         status=status.HTTP_200_OK,
     )
 
 
-def failure(message: str, errors: Any, status_code: int) -> Response:
+def failure(message: str, errors: object, status_code: int) -> Response:
     return Response(
         {"success": False, "message": message, "data": None, "errors": errors},
         status=status_code,
@@ -82,7 +81,7 @@ class AuditEventListView(APIView):
 
         queryset = filter_audit_events(
             list_visible_audit_events(request.user),
-            **cast(dict[str, Any], filters.validated_data),
+            filters=filters.validated_data,
         )
         paginator = AuditPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)

@@ -14,8 +14,8 @@ from django.http import HttpRequest
 from django.test import override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import PasswordResetToken
 from apps.accounts.views import CurrentUserView
