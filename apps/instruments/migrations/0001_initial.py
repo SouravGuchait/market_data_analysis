@@ -9,7 +9,7 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('exchanges', '0002_alter_exchange_options_alter_exchange_code_and_more'),
+        ('exchanges', '0003_preserve_exchange_schema'),
     ]
 
     operations = [

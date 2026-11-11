@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from django.db import models
+
 from apps.exchanges.models import Exchange
 
 
@@ -22,9 +23,7 @@ class Instrument(models.Model):
         CNY = "CNY", "Chinese Yuan"
         CHF = "CHF", "Swiss Franc"
 
-    exchange = models.ForeignKey(
-        Exchange, on_delete=models.PROTECT, related_name="instruments"
-    )
+    exchange = models.ForeignKey(Exchange, on_delete=models.PROTECT, related_name="instruments")
     symbol = models.CharField(max_length=50)
     name = models.CharField(max_length=255)
     asset_class = models.CharField(max_length=20, choices=AssetClass.choices)
@@ -36,12 +35,9 @@ class Instrument(models.Model):
     class Meta:
         db_table = "mda_instruments"
         constraints = [
-            models.UniqueConstraint(
-                fields=["exchange", "symbol"], name="unique_exchange_symbol"
-            )
+            models.UniqueConstraint(fields=["exchange", "symbol"], name="unique_exchange_symbol")
         ]
         indexes = [models.Index(fields=["symbol"], name="idx_instrument_symbol")]
-        abstract = True
 
     def __str__(self) -> str:
         return f"{self.symbol} ({self.exchange.code})"
