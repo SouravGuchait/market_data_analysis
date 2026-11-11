@@ -1,8 +1,10 @@
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 
+from apps.exchanges.models import Exchange
 from apps.instruments.models import Instrument
 
 
@@ -39,6 +41,12 @@ class PortfolioInstrument(models.Model):
     instrument = models.ForeignKey(
         Instrument, on_delete=models.PROTECT, related_name="portfolio_links"
     )
+    exchange = models.ForeignKey(
+        Exchange,
+        on_delete=models.PROTECT,
+        related_name="portfolio_links",
+        help_text="Must match the exchange of the selected instrument.",
+    )
     alias = models.CharField(max_length=100, blank=True, default="")
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -54,3 +62,20 @@ class PortfolioInstrument(models.Model):
 
     def __str__(self) -> str:
         return f"{self.portfolio.name}: {self.instrument.symbol}"
+
+    def save(self, *args, **kwargs) -> None:
+        # Legacy rows created before Feature 003 have no exchange value.
+        if self.exchange_id is None:  # pyright: ignore[reportAttributeAccessIssue]
+            self.exchange = self.instrument.exchange
+        self._validate_exchange_matches_instrument()
+        super().save(*args, **kwargs)
+
+    def clean(self) -> None:
+        self._validate_exchange_matches_instrument()
+
+    def _validate_exchange_matches_instrument(self) -> None:
+        exchange_id = self.exchange_id  # pyright: ignore[reportAttributeAccessIssue]
+        if exchange_id is not None and exchange_id != self.instrument.exchange.pk:
+            raise ValidationError(
+                {"exchange": "The selected exchange must match the instrument's exchange."}
+            )
