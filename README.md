@@ -145,15 +145,15 @@ repository. Run commands from the repository root.
    source "$HOME/.bashrc"
    ```
 
-4. Build and start the services, then apply migrations:
+4. Build and start the services:
 
    ```bash
    dev_up --build
-   project_dir="$PWD"
-   docker compose --project-directory "$project_dir" \
-     --env-file "$env_file" \
-     -f "$project_dir/docker-compose.yml" exec web python manage.py migrate
    ```
+
+   Compose waits for MySQL to become healthy, runs `python manage.py migrate`
+   in the one-shot `migrate` service, then starts the web, worker and beat
+   services after migrations succeed.
 
 After setup, `dev_up`, `dev_down` and `dev_restart` work from any new WSL Bash
 terminal. They accept optional service names, for example `dev_restart web`.

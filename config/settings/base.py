@@ -4,9 +4,8 @@ Environment variables are read once at import time.  Environment-specific
 modules (``development``, ``production``, ``test``) are responsible for
 providing safe defaults or failing fast when a required value is missing.
 """
-
 from __future__ import annotations
-
+from datetime import timedelta
 import os
 from pathlib import Path
 
@@ -81,6 +80,15 @@ DEBUG = env_bool("DJANGO_DEBUG", default=False)
 ALLOWED_HOSTS = env_list("DJANGO_ALLOWED_HOSTS")
 CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
 
+SECURE_BROWSER_XSS_FILTER = True
+SECURE_CONTENT_TYPE_NOSNIFF = True
+X_FRAME_OPTIONS = "DENY"
+
+if not os.getenv("DEBUG", "True") == "True":
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -89,6 +97,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework_simplejwt.token_blacklist",
     "drf_spectacular",
     "apps.common",
     "apps.accounts",
@@ -99,6 +108,7 @@ INSTALLED_APPS = [
     "apps.portfolios",
     "apps.analytics",
     "apps.audit",
+    'django_zxcvbn_password_validator',
 ]
 
 MIDDLEWARE = [
@@ -172,6 +182,10 @@ AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
     },
+    {
+        # Enforces zxcvbn validation on the backend
+        'NAME': 'django_zxcvbn_password_validator.ZxcvbnPasswordValidator',
+    },
 ]
 
 
@@ -194,19 +208,46 @@ API_PREFIX = "api/v1/"
 # ---------------------------------------------------------------------------
 
 REST_FRAMEWORK = {
-    "DEFAULT_PERMISSION_CLASSES": [
-        "rest_framework.permissions.IsAuthenticated",
-    ],
-    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
-    "DEFAULT_RENDERER_CLASSES": [
-        "rest_framework.renderers.JSONRenderer",
-    ],
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ),
+    "DEFAULT_THROTTLE_CLASSES": (
+        # ScopedRateThrottle looks at the 'throttle_scope' variable inside your views
+        "rest_framework.throttling.ScopedRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ),
+    "DEFAULT_THROTTLE_RATES": {
+        "anon_register": "5/min",                  # Max 5 registrations per minute per IP
+        "anon_login": "5/min",                     # Max 10 login attempts per minute per IP
+        "anon_token_refresh": "5/min",             # Max 5 token refreshes per minute per IP
+        "anon_password_reset": "3/min",             # Max 3 reset requests per minute per IP
+        "anon_password_reset_confirm": "3/min",     # Max 3 confirmation requests per minute per IP
+        "user_profile": "5/min",                  # High limit for logged-in users checking profiles
+        "user": "1000/hour",
+    },
 }
 
-if DEBUG:
-    REST_FRAMEWORK["DEFAULT_RENDERER_CLASSES"].append(
-        "rest_framework.renderers.BrowsableAPIRenderer"
-    )
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    "ROTATE_REFRESH_TOKENS": True,          # Issue new refresh token on every refresh call
+    "BLACKLIST_AFTER_ROTATION": True,      # Blacklist the old refresh token
+    "UPDATE_LAST_LOGIN": True,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+}
+
+# --- 4. EMAIL & RESET CONFIGURATION ---
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", 25))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "True") == "True"
+EMAIL_TIMEOUT = 10
+
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "noreply@marketanalytics.com")
+FRONTEND_RESET_URL = os.getenv("FRONTEND_RESET_URL", "http://localhost:3000/reset-password")
+PASSWORD_RESET_TIMEOUT_DAYS = 1  # 24 hours expiry
 
 SPECTACULAR_SETTINGS = {
     "TITLE": "Market Data Analytics API",
@@ -240,10 +281,22 @@ CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 
 LOG_LEVEL = env_str("LOG_LEVEL", "INFO").upper()
 LOG_FILE_PATH = str(resolve_path(env_str("LOG_FILE_PATH", "/var/log/mda/app.log")))
+LOG_FILE_ENABLED = env_bool("LOG_FILE_ENABLED", default=True)
 LOG_MAX_BYTES = env_int("LOG_MAX_BYTES", 10 * 1024 * 1024)
 LOG_BACKUP_COUNT = env_int("LOG_BACKUP_COUNT", 5)
 
-ensure_log_directory(LOG_FILE_PATH)
+if LOG_FILE_ENABLED:
+    try:
+        ensure_log_directory(LOG_FILE_PATH)
+    except PermissionError:
+        if os.getenv("DJANGO_SETTINGS_MODULE") != "config.settings.development":
+            raise
+        LOG_FILE_PATH = str(BASE_DIR / "logs" / "app.log")
+        ensure_log_directory(LOG_FILE_PATH)
+
+LOG_HANDLERS = ["console"]
+if LOG_FILE_ENABLED:
+    LOG_HANDLERS.append("file")
 
 LOGGING = {
     "version": 1,
@@ -264,39 +317,45 @@ LOGGING = {
             "formatter": "structured",
             "filters": ["request_id"],
         },
-        "file": {
-            "class": "logging.handlers.RotatingFileHandler",
-            "filename": LOG_FILE_PATH,
-            "maxBytes": LOG_MAX_BYTES,
-            "backupCount": LOG_BACKUP_COUNT,
-            "encoding": "utf-8",
-            "formatter": "structured",
-            "filters": ["request_id"],
-            "delay": False,
-        },
+        **(
+            {
+                "file": {
+                    "class": "logging.handlers.RotatingFileHandler",
+                    "filename": LOG_FILE_PATH,
+                    "maxBytes": LOG_MAX_BYTES,
+                    "backupCount": LOG_BACKUP_COUNT,
+                    "encoding": "utf-8",
+                    "formatter": "structured",
+                    "filters": ["request_id"],
+                    "delay": False,
+                }
+            }
+            if LOG_FILE_ENABLED
+            else {}
+        ),
     },
     "root": {
-        "handlers": ["console", "file"],
+        "handlers": LOG_HANDLERS,
         "level": LOG_LEVEL,
     },
     "loggers": {
         "django": {
-            "handlers": ["console", "file"],
+            "handlers": LOG_HANDLERS,
             "level": LOG_LEVEL,
             "propagate": False,
         },
         "django.server": {
-            "handlers": ["console", "file"],
+            "handlers": LOG_HANDLERS,
             "level": LOG_LEVEL,
             "propagate": False,
         },
         "celery": {
-            "handlers": ["console", "file"],
+            "handlers": LOG_HANDLERS,
             "level": LOG_LEVEL,
             "propagate": False,
         },
         "apps": {
-            "handlers": ["console", "file"],
+            "handlers": LOG_HANDLERS,
             "level": LOG_LEVEL,
             "propagate": False,
         },
