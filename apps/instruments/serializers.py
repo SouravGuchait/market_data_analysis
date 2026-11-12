@@ -74,6 +74,16 @@ class InstrumentRelationSerializer(serializers.ModelSerializer):
         fields = ("symbol", "name", "exchange", "asset_class", "currency", "is_active")
 
 
+class InstrumentFilterSerializer(serializers.Serializer):
+    """Query filters for the shared instrument catalog."""
+
+    exchange_code = serializers.CharField(required=False, allow_blank=True)
+    symbol = serializers.CharField(required=False, allow_blank=True)
+    asset_class = serializers.ChoiceField(choices=Instrument.AssetClass.choices, required=False)
+    currency = serializers.ChoiceField(choices=Instrument.Currency.choices, required=False)
+    search = serializers.CharField(required=False, allow_blank=True)
+
+
 class InstrumentReadSerializer(serializers.ModelSerializer):
     exchange = ExchangeRelationSerializer(read_only=True)
     exchange_name = serializers.ReadOnlyField(source="exchange.name")

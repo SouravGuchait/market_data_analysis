@@ -34,6 +34,24 @@ def get_user_portfolio(owner: Any, portfolio_id: uuid.UUID) -> Portfolio | None:
     return _portfolio_queryset(owner).filter(pk=portfolio_id).first()
 
 
+class AmbiguousPortfolioNameError(Exception):
+    """The authenticated user has more than one portfolio with this name."""
+
+
+def get_user_portfolio_by_name(owner: Any, name: str) -> Portfolio | None:
+    """Fetch one owned portfolio by its name.
+
+    Matching is case-insensitive and limited to the authenticated user.
+    """
+
+    matches = list(_portfolio_queryset(owner).filter(name__iexact=name)[:2])
+    if len(matches) > 1:
+        raise AmbiguousPortfolioNameError(name)
+    if not matches:
+        return None
+    return matches[0]
+
+
 def list_portfolio_instruments(portfolio: Portfolio) -> QuerySet[PortfolioInstrument]:
     return (
         PortfolioInstrument.objects.filter(portfolio=portfolio)

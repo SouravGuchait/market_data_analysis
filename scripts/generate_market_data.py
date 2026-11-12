@@ -15,6 +15,7 @@ Examples:
     python scripts/generate_market_data.py --base 2 --exponent 16 --symbols 8
     python scripts/generate_market_data.py --symbols 5 --days 100   # legacy
 """
+
 import secrets
 import argparse
 import json
@@ -110,6 +111,17 @@ ERROR_KINDS = [
 ]
 
 
+def canonical_instruments(count: int | None = None) -> list[Row]:
+    """Return the instrument catalog shared by generation and database seeding.
+
+    The default count is the symbol pool, so each pool symbol is listed once.
+    A larger count uses the same index rules as ``build_instruments``, including
+    the numeric generation suffix.
+    """
+    size = len(SYMBOL_POOL) if count is None else count
+    return build_instruments(size)
+
+
 def build_instruments(count: int) -> list[Row]:
     """Return `count` instrument descriptors drawn from a fixed vocabulary."""
     if count < 1:
@@ -156,9 +168,7 @@ def _assert_clean(row: Row) -> None:
     assert isinstance(row["volume"], int) and row["volume"] >= 0, row
 
 
-def generate_rows(
-    instruments: list[Row], dates: list[date], rng: np.random.Generator
-) -> list[Row]:
+def generate_rows(instruments: list[Row], dates: list[date], rng: np.random.Generator) -> list[Row]:
     """Generate plausible OHLCV rows with rounding-safe intra-day ranges."""
     rows: list[Row] = []
     last_close: dict[str, float] = {}
@@ -228,7 +238,7 @@ def make_dirty_rows(rows: list[Row], rng: np.random.Generator) -> list[Row]:
         elif kind == "bad_type":
             row["volume"] = "12k"
         elif kind == "malformed_number":
-            row["open"] = f'{row["open"]:,.4f}'
+            row["open"] = f"{row['open']:,.4f}"
         elif kind == "empty_string":
             row["adjusted_close"] = ""
         elif kind == "negative_price":
@@ -244,9 +254,7 @@ def make_dirty_rows(rows: list[Row], rng: np.random.Generator) -> list[Row]:
     return dirty + [exact_duplicate, conflicting_duplicate]
 
 
-def generate_ticks(
-    rows: list[Row], ticks_per_day: int, rng: np.random.Generator
-) -> list[Row]:
+def generate_ticks(rows: list[Row], ticks_per_day: int, rng: np.random.Generator) -> list[Row]:
     """Expand each clean daily candle into `ticks_per_day` individual trades.
 
     Ticks are consistent with their candle: the first price is the open, the
@@ -290,9 +298,7 @@ def generate_ticks(
     return ticks
 
 
-def write_csv(
-    rows: list[Row], path: Path, columns: list[str] = COLUMNS
-) -> None:
+def write_csv(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None:
     pd.DataFrame(rows, columns=pd.Index(columns)).to_csv(path, index=False)
 
 
@@ -301,15 +307,11 @@ def write_json(rows: list[Row], path: Path) -> None:
     _ = path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def write_xlsx(
-    rows: list[Row], path: Path, columns: list[str] = COLUMNS
-) -> None:
+def write_xlsx(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None:
     pd.DataFrame(rows, columns=pd.Index(columns)).to_excel(path, index=False)
 
 
-def resolve_row_target(
-    symbols: int, days: int, exponent: int | None, base: int
-) -> tuple[int, int]:
+def resolve_row_target(symbols: int, days: int, exponent: int | None, base: int) -> tuple[int, int]:
     """Return (target_rows, days_needed). Exponent mode overrides `days`."""
     if exponent is None:
         return symbols * days, days
@@ -341,8 +343,7 @@ def generate(
     run_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     target_rows, days_needed = resolve_row_target(symbols, days, exponent, base)
-    logger.info("Target clean rows=%d (%d symbols x %d days)",
-                target_rows, symbols, days_needed)
+    logger.info("Target clean rows=%d (%d symbols x %d days)", target_rows, symbols, days_needed)
     instruments = build_instruments(symbols)
     try:
         dates = build_dates(start or date(2024, 1, 2), days_needed)
@@ -361,8 +362,7 @@ def generate(
     for extension, writer in writers.items():
         for label, payload in payloads.items():
             if extension == "xlsx" and len(payload) > XLSX_MAX_ROWS:
-                logger.warning("Skipping %s xlsx: %d rows exceeds Excel limit",
-                               label, len(payload))
+                logger.warning("Skipping %s xlsx: %d rows exceeds Excel limit", label, len(payload))
                 continue
             name = f"synthetic_market_{label}_{run_stamp}.{extension}"
             writer(payload, out / name)
@@ -385,9 +385,7 @@ def generate(
             _ = (out / name).write_bytes(b"")
 
     # Unexpected extra column appended to an otherwise valid subset.
-    unexpected = [
-        dict(row, unexpected_extra="ignore-me") for row in rows[: max(len(rows) // 4, 1)]
-    ]
+    unexpected = [dict(row, unexpected_extra="ignore-me") for row in rows[: max(len(rows) // 4, 1)]]
     name = f"synthetic_market_unexpected_columns_{run_stamp}.csv"
     counts[name] = len(unexpected)
     write_csv(unexpected, out / name, columns=COLUMNS + ["unexpected_extra"])
