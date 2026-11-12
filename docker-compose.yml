@@ -101,35 +101,8 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  beat:
-    build:
-      context: .
-    command:
-      - celery
-      - -A
-      - config
-      - beat
-      - --loglevel=INFO
-      - --schedule=/var/lib/celery/beat-schedule
-    environment: *django_environment
-    healthcheck:
-      disable: true
-    volumes:
-      - .:/app
-      - mda_logs:/var/log/mda
-      - mda_ingestion:/data/ingestion
-      - mda_celery_beat:/var/lib/celery
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-
 volumes:
   mysql_data:
   redis_data:
   mda_logs:
   mda_ingestion:
-  mda_celery_beat:

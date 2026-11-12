@@ -22,7 +22,7 @@ This repository implements **Project Foundation**, **Custom User Authentication*
 - Console and rotating-file structured logging with request correlation IDs.
 - Liveness and readiness health endpoints.
 - Exchange master-data model.
-- Docker Compose for local development with MySQL, Redis, web, worker and beat.
+- Docker Compose for local development with MySQL, Redis, web and worker.
 - Unit and integration test structure with pytest and pytest-django.
 
 ### Custom User Authentication
@@ -270,8 +270,8 @@ repository. Run commands from the repository root.
    ```
 
    Compose waits for MySQL to become healthy, runs `python manage.py migrate`
-   in the one-shot `migrate` service, then starts the web, worker and beat
-   services after migrations succeed.
+   in the one-shot `migrate` service, then starts the web and worker services
+   after migrations succeed.
 
 After setup, `dev_up`, `dev_down` and `dev_restart` work from any new WSL Bash
 terminal. They accept optional service names, for example `dev_restart web`.
@@ -284,7 +284,6 @@ This starts:
 - Redis on `REDIS_HOST_PORT` (default `6379`).
 - Django on `http://localhost:8000`.
 - Celery worker.
-- Celery Beat.
 
 Docker Compose reads variables from the configured env file and substitutes
 `${VARIABLE}` expressions in `docker-compose.yml`. The Compose-specific values
@@ -296,7 +295,7 @@ host. MySQL uses the non-root `DB_USER` account for Django, with
 Compose requires the database credentials, Django secret and allowed hosts,
 `MYSQL_HOST_PORT`, `REDIS_HOST_PORT`, `REDIS_IMAGE`, `WEB_HOST_PORT`, `COMPOSE_DB_HOST`,
 `COMPOSE_DB_PORT`, the three `COMPOSE_*` Redis URLs, and the Compose ingestion
-path. The web, worker and beat containers write logs to `/var/log/mda/app.log`
+path. The web and worker containers write logs to `/var/log/mda/app.log`
 in the persistent `mda_logs` Docker volume. View the web container log with
 `docker compose exec web tail -f /var/log/mda/app.log`. It stops with a clear
 error if a required value is missing.

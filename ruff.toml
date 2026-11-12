@@ -3,8 +3,21 @@ line-length = 100
 extend-exclude = ["**/migrations", "scripts", ".venv", "logs"]
 
 [lint]
-select = ["E", "F", "I", "UP", "B", "DJ"]
+select = [
+    "E", "F", "I", "UP", "B", "DJ", 
+    "C90", "PLR", "SIM", 
+    "RET", "PIE", "FURB", "ERA"
+]
 ignore = ["E501"]
 
 [lint.isort]
 known-first-party = ["apps", "config"]
+
+[lint.mccabe]
+max-complexity = 7  # Default is 10; 7 blocks deeply nested AI logic
+
+[lint.pylint]
+max-args = 5        # Default is 5; prevents bloated function signatures
+max-branches = 8    # Default is 12; forces simpler if/elif chains
+max-returns = 3     # Default is 6; prevents spaghetti exit paths
+max-statements = 30 # Default is 50; keeps functions short and readable
