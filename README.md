@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, and the **User Audit Trail**. File ingestion workflows and analytics calculations remain future features.
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, and **Instrument Master Seeding**. File ingestion workers and analytics calculations remain future features.
 
 ## Implemented features
 
@@ -29,15 +29,15 @@ This repository implements **Project Foundation**, **Custom User Authentication*
 
 Authentication routes are mounted under `/api/v1/auth/`.
 
-| Method | Endpoint | View | Purpose |
-| --- | --- | --- | --- |
-| POST | `/api/v1/auth/register/` | `RegisterView.post` | Create an account from username, email, password, and password confirmation. |
-| POST | `/api/v1/auth/login/` | `LoginView.post` | Authenticate using a username or email and password; return access and refresh JWTs. |
-| POST | `/api/v1/auth/token/refresh/` | `ThrottledTokenRefreshView` | Refresh an access token using a refresh token. |
-| POST | `/api/v1/auth/logout/` | `LogoutView.post` | Blacklist the submitted refresh token for the authenticated user. |
-| GET | `/api/v1/auth/me/` | `CurrentUserView.get` | Return the authenticated user's profile. |
-| POST | `/api/v1/auth/password-reset/` | `PasswordResetRequestView.post` | Request a reset link by email; return a generic response. |
-| POST | `/api/v1/auth/password-reset/confirm/` | `PasswordResetConfirmView.post` | Set a new password using a valid, unused reset token. |
+| Method | Endpoint                                 | View                              | Purpose                                                                              |
+| ------ | ---------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------ |
+| POST   | `/api/v1/auth/register/`               | `RegisterView.post`             | Create an account from username, email, password, and password confirmation.         |
+| POST   | `/api/v1/auth/login/`                  | `LoginView.post`                | Authenticate using a username or email and password; return access and refresh JWTs. |
+| POST   | `/api/v1/auth/token/refresh/`          | `ThrottledTokenRefreshView`     | Refresh an access token using a refresh token.                                       |
+| POST   | `/api/v1/auth/logout/`                 | `LogoutView.post`               | Blacklist the submitted refresh token for the authenticated user.                    |
+| GET    | `/api/v1/auth/me/`                     | `CurrentUserView.get`           | Return the authenticated user's profile.                                             |
+| POST   | `/api/v1/auth/password-reset/`         | `PasswordResetRequestView.post` | Request a reset link by email; return a generic response.                            |
+| POST   | `/api/v1/auth/password-reset/confirm/` | `PasswordResetConfirmView.post` | Set a new password using a valid, unused reset token.                                |
 
 #### Authentication functions
 
@@ -65,16 +65,16 @@ Registration, login, refresh, password-reset request, and confirmation use scope
 Portfolio routes are mounted under `/api/v1/portfolios/` and require JWT
 authentication.
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| GET | `/api/v1/portfolios/` | List the authenticated user's portfolios. |
-| POST | `/api/v1/portfolios/` | Create a portfolio for the authenticated user. |
-| GET | `/api/v1/portfolios/{portfolio_id}/` | Retrieve one owned portfolio. |
-| PATCH | `/api/v1/portfolios/{portfolio_id}/` | Update name, description or status. |
-| DELETE | `/api/v1/portfolios/{portfolio_id}/` | Delete an owned portfolio. |
-| GET | `/api/v1/portfolios/{portfolio_id}/instruments/` | List portfolio instrument membership. |
-| POST | `/api/v1/portfolios/{portfolio_id}/instruments/` | Add an instrument to a portfolio. |
-| DELETE | `/api/v1/portfolios/{portfolio_id}/instruments/{id}/` | Remove an instrument membership. |
+| Method | Endpoint                                                | Purpose                                        |
+| ------ | ------------------------------------------------------- | ---------------------------------------------- |
+| GET    | `/api/v1/portfolios/`                                 | List the authenticated user's portfolios.      |
+| POST   | `/api/v1/portfolios/`                                 | Create a portfolio for the authenticated user. |
+| GET    | `/api/v1/portfolios/{portfolio_id}/`                  | Retrieve one owned portfolio.                  |
+| PATCH  | `/api/v1/portfolios/{portfolio_id}/`                  | Update name, description or status.            |
+| DELETE | `/api/v1/portfolios/{portfolio_id}/`                  | Delete an owned portfolio.                     |
+| GET    | `/api/v1/portfolios/{portfolio_id}/instruments/`      | List portfolio instrument membership.          |
+| POST   | `/api/v1/portfolios/{portfolio_id}/instruments/bulk/` | Add an instrument to a portfolio.              |
+| DELETE | `/api/v1/portfolios/{portfolio_id}/instruments/{id}/` | Remove an instrument membership.               |
 
 Ownership is always derived from the authenticated request; the owner cannot be
 set or changed through request data. Every query is scoped to the authenticated
@@ -102,7 +102,6 @@ Example request:
 }
 ```
 
-
 `PortfolioInstrument.exchange` is stored explicitly for the portfolio
 configuration, is backfilled from the instrument by migration `0003`, and is
 validated in both the model and serializer. The existing unique constraint on
@@ -112,10 +111,10 @@ validated in both the model and serializer. The existing unique constraint on
 
 Audit routes are mounted under `/api/v1/audit/` and require JWT authentication.
 
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| GET | `/api/v1/audit/` | List audit records visible to the authenticated user. |
-| GET | `/api/v1/audit/{audit_id}/` | Retrieve one visible audit record. |
+| Method | Endpoint                      | Purpose                                               |
+| ------ | ----------------------------- | ----------------------------------------------------- |
+| GET    | `/api/v1/audit/`            | List audit records visible to the authenticated user. |
+| GET    | `/api/v1/audit/{audit_id}/` | Retrieve one visible audit record.                    |
 
 Ordinary users see only records attributed to their own account. Staff users
 are the restricted administrative audience and may inspect all records,
@@ -142,6 +141,51 @@ stored record, and no write API is exposed. Deleting an actor user preserves the
 audit row and sets the actor to null.
 
 Ingestion workers are future work.
+
+### Feature 004.5: Instrument seeding and portfolio instrument management
+
+Shared exchange and instrument master data can be loaded from the synthetic
+generator and managed through authenticated APIs.
+
+```bash
+python manage.py seed_exchanges
+python manage.py seed_instruments
+python manage.py seed_market_data
+```
+
+Inside the Compose web container:
+
+```bash
+_mda_compose exec web python3 manage.py seed_market_data
+```
+
+`seed_market_data` seeds exchanges first, then instruments. `seed_exchanges` and
+`seed_instruments` also run on their own. `seed_instruments --count` defaults to
+the generator symbol pool. The same `--count` flag is accepted by
+`seed_market_data`. The catalog is `canonical_instruments()` in
+`scripts/generate_market_data.py`, so daily files and tick files that use those
+listings refer to the same instrument. Seeding is safe to repeat. It refreshes
+seed-controlled names, timezones, asset classes and currencies, and leaves
+`is_active` and records outside the catalog unchanged.
+
+| Method | Endpoint                                                | Purpose                                                                                                     |
+| ------ | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/v1/exchanges/`                                  | List shared exchanges. Optional `code` filter.                                                            |
+| GET    | `/api/v1/instruments/`                                | List shared instruments. Filters: `exchange_code`, `symbol`, `asset_class`, `currency`, `search`. |
+| POST   | `/api/v1/instruments/`                                | Create one shared instrument on an existing exchange.                                                       |
+| GET    | `/api/v1/portfolios/by-name/?name=`                   | Retrieve one owned portfolio by its name.                                                                   |
+| POST   | `/api/v1/portfolios/by-name/instruments/bulk/`        | Bulk-attach instruments to an owned portfolio addressed by `name`.                                        |
+| POST   | `/api/v1/portfolios/{portfolio_id}/instruments/bulk/` | The same bulk attach, addressed by portfolio id.                                                            |
+
+The name match is case-insensitive and only searches portfolios you own. A missing name returns 404. If you have two portfolios with that same name, the response is 409 and you should use the existing id route. The bulk response includes both `name` and `portfolio_id`; each instrument line still uses `symbol` and `exchange`.
+
+Portfolio creation and single-instrument attach remain the Feature 003
+endpoints. Bulk attachment is all-or-nothing: one invalid exchange, instrument
+or metadata mismatch rolls the request back. An instrument that is already
+attached is reported as `ALREADY_ATTACHED` and is not duplicated. Ingestion
+mapping resolves `exchange` plus `symbol` to the shared instrument and does not
+create a listing unless the caller explicitly opts in. Portfolio membership is
+not required for that resolution.
 
 ## Project layout
 
@@ -187,20 +231,17 @@ Ingestion workers are future work.
    python -m venv .venv
    .\.venv\Scripts\Activate.ps1
    ```
-
 2. Install dependencies:
 
    ```powershell
    pip install -r requirements-dev.txt
    ```
-
 3. Copy `.env.example` to `.env`. It contains generated local sample secrets;
    generate new secrets before sharing or deploying the application:
 
    ```powershell
    Copy-Item .env.example .env
    ```
-
 4. Start MySQL and Redis. MySQL is exposed on host port `3307` by default and
    listens on container port `3306`. `DB_PORT` is for Django running directly
    on your computer; Compose overrides it to `3306` for containers.
@@ -208,14 +249,12 @@ Ingestion workers are future work.
    ```powershell
    docker compose up -d db redis
    ```
-
 5. Apply migrations and start Django:
 
    ```powershell
    python manage.py migrate
    python manage.py runserver
    ```
-
 6. Start Celery worker and beat in separate terminals:
 
    ```powershell
@@ -237,7 +276,6 @@ repository. Run commands from the repository root.
    env_file="$env_dir/your-desired-name.env"
    mkdir -p "$env_dir"
    ```
-
 2. For a new setup, copy the sample file. If you already have a project `.env`,
    move it instead. Choose one command:
 
@@ -254,7 +292,6 @@ repository. Run commands from the repository root.
    chmod 600 "$env_file"
    nano "$env_file"
    ```
-
 3. Install the global WSL Bash shortcuts. The script detects the repository
    location from its own path and saves the selected env file location:
 
@@ -262,7 +299,6 @@ repository. Run commands from the repository root.
    bash scripts/install_dev_commands.sh "$env_file"
    source "$HOME/.bashrc"
    ```
-
 4. Build and start the services:
 
    ```bash
@@ -386,12 +422,12 @@ status if any dependency is unavailable.
 Logs are emitted to the console and to a rotating file. The file path, level,
 rotation size and backup count are environment-driven:
 
-| Variable | Purpose | Default |
-| --- | --- | --- |
-| `LOG_LEVEL` | Root log level | `INFO` |
-| `LOG_FILE_PATH` | Rotating log file path | `/var/log/mda/app.log` |
-| `LOG_MAX_BYTES` | Maximum size of one log file | `10485760` |
-| `LOG_BACKUP_COUNT` | Number of rotated files retained | `5` |
+| Variable             | Purpose                          | Default                  |
+| -------------------- | -------------------------------- | ------------------------ |
+| `LOG_LEVEL`        | Root log level                   | `INFO`                 |
+| `LOG_FILE_PATH`    | Rotating log file path           | `/var/log/mda/app.log` |
+| `LOG_MAX_BYTES`    | Maximum size of one log file     | `10485760`             |
+| `LOG_BACKUP_COUNT` | Number of rotated files retained | `5`                    |
 
 Each log line is a JSON object containing the timestamp, level, logger,
 message, request ID and any safe structured fields. `X-Request-ID` is accepted

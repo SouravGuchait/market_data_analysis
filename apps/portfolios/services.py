@@ -6,6 +6,8 @@ from typing import Any
 
 from django.db import IntegrityError, transaction
 
+from apps.exchanges.models import Exchange
+from apps.instruments.models import Instrument
 from apps.portfolios.models import Portfolio, PortfolioInstrument
 
 EDITABLE_PORTFOLIO_FIELDS = ("name", "description", "status")
@@ -39,12 +41,25 @@ def delete_portfolio(portfolio: Portfolio) -> None:
     portfolio.delete()
 
 
-def add_portfolio_instrument(portfolio: Portfolio, data: dict[str, Any]) -> PortfolioInstrument:
+def add_portfolio_instrument(
+    portfolio: Portfolio,
+    *,
+    instrument: Instrument,
+    exchange: Exchange,
+    alias: str = "",
+    is_active: bool = True,
+) -> PortfolioInstrument:
     """Add an instrument to a portfolio, preserving the unique membership rule."""
 
     try:
         with transaction.atomic():
-            return PortfolioInstrument.objects.create(portfolio=portfolio, **data)
+            return PortfolioInstrument.objects.create(
+                portfolio=portfolio,
+                instrument=instrument,
+                exchange=exchange,
+                alias=alias,
+                is_active=is_active,
+            )
     except IntegrityError as exc:
         raise DuplicatePortfolioInstrumentError from exc
 
