@@ -54,14 +54,21 @@ services:
       CELERY_BROKER_URL: ${COMPOSE_CELERY_BROKER_URL:?Set COMPOSE_CELERY_BROKER_URL in .env}
       CELERY_RESULT_BACKEND: ${COMPOSE_CELERY_RESULT_BACKEND:?Set COMPOSE_CELERY_RESULT_BACKEND in .env}
       LOG_FILE_PATH: /var/log/mda/app.log
-      INGESTION_LOCAL_ROOT: ${COMPOSE_INGESTION_LOCAL_ROOT:?Set COMPOSE_INGESTION_LOCAL_ROOT in .env}
+      INGESTION_LOCAL_ROOT: /data/ingestion
+      INGESTION_SCAN_INTERVAL_SECONDS: ${INGESTION_SCAN_INTERVAL_SECONDS:-60}
+      INGESTION_S3_BUCKET: ${INGESTION_S3_BUCKET:-}
+      INGESTION_S3_PREFIX: ${INGESTION_S3_PREFIX:-}
+      INGESTION_S3_REGION: ${INGESTION_S3_REGION:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       TIME_ZONE: ${TIME_ZONE:?Set TIME_ZONE in .env}
     ports:
       - "${WEB_HOST_PORT:?Set WEB_HOST_PORT in .env}:8000"
     volumes:
       - .:/app
       - mda_logs:/var/log/mda
-      - mda_ingestion:/data/ingestion
+      - ./sample_data:/data/ingestion
     depends_on:
       db:
         condition: service_healthy
@@ -92,7 +99,7 @@ services:
     volumes:
       - .:/app
       - mda_logs:/var/log/mda
-      - mda_ingestion:/data/ingestion
+      - ./sample_data:/data/ingestion
     depends_on:
       db:
         condition: service_healthy
@@ -105,4 +112,3 @@ volumes:
   mysql_data:
   redis_data:
   mda_logs:
-  mda_ingestion:

@@ -9,7 +9,6 @@ from __future__ import annotations
 import ipaddress
 import logging
 from collections.abc import Mapping
-from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -38,26 +37,46 @@ def _is_sensitive_key(key: str) -> bool:
     return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
 
 
-def _sanitize_value(key: str, value: Any, depth: int = 0) -> Any:
-    if _is_sensitive_key(key):
-        return "[REDACTED]"
-    if depth >= _MAX_DEPTH:
-        return "[TRUNCATED]"
-
+def _sanitize_container(key: str, value: object, depth: int) -> Any:
     if isinstance(value, Mapping):
         return {
             str(child_key): _sanitize_value(str(child_key), child_value, depth + 1)
             for child_key, child_value in value.items()
         }
-    if isinstance(value, (list, tuple, set)):
-        return [_sanitize_value(key, item, depth + 1) for item in value]
-    if value is None or isinstance(value, (bool, int, float)):
+    items = value if isinstance(value, list | tuple | set) else ()
+    return [_sanitize_value(key, item, depth + 1) for item in items]
+
+
+def _sanitize_text(value: str) -> str:
+    if len(value) <= _MAX_VALUE_LENGTH:
         return value
+    return value[:_MAX_VALUE_LENGTH] + "..."
+
+
+def _sanitize_scalar(value: Any) -> Any:
     if isinstance(value, str):
-        return value if len(value) <= _MAX_VALUE_LENGTH else value[:_MAX_VALUE_LENGTH] + "..."
-    if isinstance(value, (datetime, date, UUID)):
-        return str(value)
-    return str(value)[:_MAX_VALUE_LENGTH]
+        return _sanitize_text(value)
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    rendered = str(value)
+    return rendered if len(rendered) <= _MAX_VALUE_LENGTH else rendered[:_MAX_VALUE_LENGTH]
+
+
+def _blocked_value(key: str, depth: int) -> str | None:
+    if _is_sensitive_key(key):
+        return "[REDACTED]"
+    if depth >= _MAX_DEPTH:
+        return "[TRUNCATED]"
+    return None
+
+
+def _sanitize_value(key: str, value: Any, depth: int = 0) -> Any:
+    blocked = _blocked_value(key, depth)
+    if blocked is not None:
+        return blocked
+    if isinstance(value, Mapping | list | tuple | set):
+        return _sanitize_container(key, value, depth)
+    return _sanitize_scalar(value)
 
 
 def sanitize_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -80,9 +99,7 @@ def _resolve_request_id(request: Any | None) -> str:
 def _resolve_source_ip(request: Any | None) -> str | None:
     """Use the socket peer address only; do not trust forwarding headers."""
 
-    if request is None:
-        return None
-    raw_ip = getattr(request, "META", {}).get("REMOTE_ADDR")
+    raw_ip = getattr(request, "META", {}).get("REMOTE_ADDR") if request is not None else None
     if not raw_ip:
         return None
     try:
@@ -92,7 +109,7 @@ def _resolve_source_ip(request: Any | None) -> str | None:
     return raw_ip
 
 
-def record_audit_event(
+def record_audit_event(  # noqa: PLR0913
     *,
     action: str,
     resource_type: str,
@@ -128,7 +145,7 @@ def record_audit_event(
     return event
 
 
-def record_system_event(
+def record_system_event(  # noqa: PLR0913
     *,
     action: str,
     resource_type: str = AuditResourceType.SYSTEM,

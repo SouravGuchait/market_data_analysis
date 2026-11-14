@@ -36,10 +36,10 @@ def test_daily_ohlcv_unique_per_instrument_and_day(instrument):
         instrument=instrument,
         trading_date=date(2024, 1, 2),
         timestamp=datetime.now(UTC),
-        open=Decimal("10"),
-        high=Decimal("12"),
-        low=Decimal("9"),
-        close=Decimal("11"),
+        open=Decimal(10),
+        high=Decimal(12),
+        low=Decimal(9),
+        close=Decimal(11),
         volume=5,
     )
     assert candle.instrument == instrument

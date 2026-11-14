@@ -82,7 +82,7 @@ class AuditEventListView(APIView):
 
         queryset = filter_audit_events(
             list_visible_audit_events(request.user),
-            **cast(dict[str, Any], filters.validated_data),
+            cast(dict[str, Any], filters.validated_data),
         )
         paginator = AuditPagination()
         page = paginator.paginate_queryset(queryset, request, view=self)
