@@ -1,0 +1,296 @@
+# Pull request CI. This workflow does not build a registry release or deploy.
+# The ci job is the merge gate: it passes only when every other job passes.
+# After the first successful run, require the "ci" status check in branch
+# protection for main. That setting lives in GitHub, not in this file.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: quality
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: ./.github/actions/setup-python
+
+      - name: Formatting and lint
+        run: |
+          set -euo pipefail
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
+
+      - name: Static analysis
+        run: .venv/bin/basedpyright
+
+  security:
+    name: security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: ./.github/actions/setup-python
+
+      - name: Dependency scanning
+        run: |
+          set -euo pipefail
+          .venv/bin/pip install "pip-audit>=2.7,<3"
+          .venv/bin/pip-audit --requirement requirements.txt --requirement requirements-dev.txt --progress-spinner off
+
+  django:
+    name: django
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: ./.github/actions/setup-python
+
+      - name: Django system checks
+        run: .venv/bin/python manage.py check
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+
+      - name: Migration validation
+        run: .venv/bin/python manage.py makemigrations --check --dry-run
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.test
+
+  tests:
+    name: tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: ./.github/actions/setup-python
+
+      - name: CI workflow contract
+        run: .venv/bin/python -m pytest ci/tests -q
+
+      - name: Unit tests
+        run: |
+          .venv/bin/python -m pytest -q \
+            apps/market_data/tests/test_catalogs.py \
+            apps/market_data/tests/test_generator_resolution.py \
+            apps/market_data/tests/test_models.py \
+            apps/instruments/tests/test_serializers.py \
+            apps/portfolios/tests/test_portfolio_models.py \
+            apps/audit/tests/test_audit_recording.py
+
+      - name: API tests
+        run: |
+          .venv/bin/python -m pytest -q \
+            apps/exchanges/tests/test_exchange_seed_and_api.py \
+            apps/instruments/tests/test_instrument_seed_and_api.py \
+            apps/portfolios/tests/test_portfolio_api.py \
+            apps/portfolios/tests/test_portfolio_instrument_api.py \
+            apps/portfolios/tests/test_bulk_attach.py \
+            apps/audit/tests/test_audit_api.py \
+            apps/ingestion/tests/test_user_ingestion_api.py
+
+      - name: Authentication and ownership tests
+        run: |
+          .venv/bin/python -m pytest -q \
+            apps/accounts/tests/test_auth_api.py \
+            apps/accounts/tests/test_token_blacklist.py \
+            apps/portfolios/tests/test_portfolio_api.py \
+            apps/portfolios/tests/test_portfolio_instrument_api.py \
+            apps/portfolios/tests/test_bulk_attach.py \
+            apps/audit/tests/test_audit_api.py \
+            apps/ingestion/tests/test_user_ingestion_api.py
+
+      - name: Tick ingestion tests
+        run: |
+          .venv/bin/python -m pytest -q \
+            apps/ingestion/tests/test_converters.py \
+            apps/ingestion/tests/test_pipeline.py \
+            apps/ingestion/tests/test_scopes.py \
+            apps/ingestion/tests/test_services.py \
+            apps/ingestion/tests/test_processing.py
+
+      - name: Tick deduplication tests
+        run: |
+          .venv/bin/python -m pytest -q \
+            apps/ingestion/tests/test_processing.py::test_tick_persistence_and_dedupe \
+            apps/ingestion/tests/test_processing.py::test_concurrent_trade_duplicate_is_counted \
+            apps/ingestion/tests/test_processing.py::test_ohlcv_duplicate_and_conflict_policy \
+            apps/ingestion/tests/test_services.py::test_same_content_is_not_ingested_twice
+
+      - name: Candle aggregation tests
+        run: .venv/bin/python -m pytest -q apps/analytics/tests/test_aggregation.py
+
+      - name: Analytics formula tests
+        run: .venv/bin/python -m pytest -q apps/analytics/tests/test_returns.py
+
+      - name: Redis and Celery tests
+        run: |
+          .venv/bin/python -m pytest -q \
+            apps/ingestion/tests/test_tasks.py \
+            apps/ingestion/tests/test_processing.py::test_celery_task_processes_queued_file
+
+  streamlit:
+    name: streamlit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Streamlit frontend tests
+        run: |
+          set -euo pipefail
+          if [ -f requirements-streamlit.txt ] || [ -d frontend ]; then
+            echo "A Streamlit frontend is present, but this workflow has no frontend test command."
+            exit 1
+          fi
+          echo "No Streamlit frontend is in this repository. This step is not applicable."
+
+  docker:
+    name: docker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image and probe liveness
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.production
+          DJANGO_SECRET_KEY: ci-only-not-a-production-secret
+          DJANGO_DEBUG: "false"
+          DJANGO_ALLOWED_HOSTS: 127.0.0.1,localhost
+          DJANGO_SECURE_SSL_REDIRECT: "false"
+          DB_NAME: ci
+          DB_USER: ci
+          DB_PASSWORD: ci
+          DB_HOST: 127.0.0.1
+          DB_PORT: "3306"
+          CACHE_URL: redis://mda-ci-redis:6379/1
+          CELERY_BROKER_URL: memory://
+          CELERY_RESULT_BACKEND: cache+memory://
+          LOG_FILE_PATH: /var/log/mda/app.log
+          LOG_LEVEL: INFO
+        run: |
+          set -euo pipefail
+          image="mda-ci:${GITHUB_SHA}"
+          docker build --tag "$image" .
+          docker rm --force mda-ci mda-ci-redis >/dev/null 2>&1 || true
+          docker network rm mda-ci-net >/dev/null 2>&1 || true
+          docker network create mda-ci-net
+          docker run --detach --name mda-ci-redis --network mda-ci-net redis:7
+          ready=0
+          for _ in $(seq 1 30); do
+            if docker exec mda-ci-redis redis-cli ping | grep -q PONG; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+            echo "Redis did not become ready."
+            exit 1
+          fi
+          docker run \
+            --detach \
+            --name mda-ci \
+            --network mda-ci-net \
+            --publish 127.0.0.1:8000:8000 \
+            --env DJANGO_SETTINGS_MODULE \
+            --env DJANGO_SECRET_KEY \
+            --env DJANGO_DEBUG \
+            --env DJANGO_ALLOWED_HOSTS \
+            --env DJANGO_SECURE_SSL_REDIRECT \
+            --env DB_NAME \
+            --env DB_USER \
+            --env DB_PASSWORD \
+            --env DB_HOST \
+            --env DB_PORT \
+            --env CACHE_URL \
+            --env CELERY_BROKER_URL \
+            --env CELERY_RESULT_BACKEND \
+            --env LOG_FILE_PATH \
+            --env LOG_LEVEL \
+            "$image"
+          cleanup() {
+            status=$?
+            if [ "$status" -ne 0 ]; then
+              docker logs mda-ci || true
+            fi
+            docker rm --force mda-ci mda-ci-redis >/dev/null 2>&1 || true
+            docker network rm mda-ci-net >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --output /tmp/mda-health.json http://127.0.0.1:8000/api/v1/health/; then
+              ok=1
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "Container liveness probe failed."
+            exit 1
+          fi
+          python3 -c 'import json; payload=json.load(open("/tmp/mda-health.json", encoding="utf-8")); assert payload["success"] is True; assert payload["data"]["status"] == "ok"'
+
+  ci:
+    name: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs:
+      - quality
+      - security
+      - django
+      - tests
+      - streamlit
+      - docker
+    if: always() && !cancelled()
+    steps:
+      - name: Block merge unless every job passed
+        env:
+          QUALITY: ${{ needs.quality.result }}
+          SECURITY: ${{ needs.security.result }}
+          DJANGO: ${{ needs.django.result }}
+          TESTS: ${{ needs.tests.result }}
+          STREAMLIT: ${{ needs.streamlit.result }}
+          DOCKER: ${{ needs.docker.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for name in QUALITY SECURITY DJANGO TESTS STREAMLIT DOCKER; do
+            result="${!name}"
+            if [ "$result" != "success" ]; then
+              echo "$name result: $result"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "Merge blocked until every CI job succeeds."
+            exit 1
+          fi
+          echo "All CI jobs passed."
