@@ -1,9 +1,9 @@
 # pyright: reportAny=false, reportExplicitAny=false
 """Deterministic synthetic market-data generator for development and testing.
 
-Generates clean and intentionally dirty fixtures in CSV, JSON, and XLSX with a
-consistent schema. Runs offline: no Django configuration, database, or market
-API is required.
+Generates clean and intentionally dirty fixtures in CSV, JSON, JSONL, and XLSX
+with a consistent schema. Optional tick files use the same four formats. Runs
+offline: no Django configuration, database, or market API is required.
 
 Row count can be given as an exponent: --exponent 4 (base 10) generates
 10**4 = 10,000 clean rows. Output files carry the UTC run timestamp in their
@@ -15,13 +15,17 @@ Examples:
     python3 scripts/generate_market_data.py --base 2 --exponent 16 --symbols 8
     python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 --output-dir sample_data
     python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 --seed 43 --output-dir sample_data
+    python scripts/generate_market_data.py --exponent 3 --ticks-per-day 1000 --seed 42
+    python scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 100 --seed 42
+    python scripts/generate_market_data.py --symbols 10 --exponent 5 --ticks-per-day 10 --seed 42
 """
 
-import secrets
 import argparse
 import json
 import logging
 import math
+import secrets
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -72,6 +76,12 @@ TICK_COLUMNS = [
     "size",
 ]
 XLSX_MAX_ROWS = 1_048_575  # Excel limit minus header row
+
+# Value-diversity settings. More decimals and a bounded, mean-reverting price
+# walk keep prices from piling up on the same values as row counts grow.
+PRICE_DECIMALS = 6  # matches the planned DecimalField(decimal_places=6)
+PRICE_REVERSION = 0.01  # daily pull of price back toward its symbol's anchor
+DEFAULT_VOLUME_HIGH = 10_000_000  # exclusive upper bound for daily volume
 
 ASSET_CLASSES = ["equity", "etf", "equity", "equity", "crypto"]
 CURRENCIES = ["USD", "EUR", "GBP", "JPY", "CNY", "CHF"]
@@ -169,20 +179,44 @@ def _assert_clean(row: Row) -> None:
     assert isinstance(row["volume"], int) and row["volume"] >= 0, row
 
 
-def generate_rows(instruments: list[Row], dates: list[date], rng: np.random.Generator) -> list[Row]:
+def volume_ceiling(target_rows: int, ticks_per_day: int) -> int:
+    """Pick the daily-volume upper bound so volumes (and tick sizes) stay diverse.
+
+    A fixed range runs out of distinct values as the row count grows. Distinct
+    tick sizes need roughly rows * ticks_per_day**2 of headroom, because each
+    daily volume is split across its ticks. Small runs keep the 10M default.
+    """
+    return max(DEFAULT_VOLUME_HIGH, 3 * target_rows * max(ticks_per_day, 1) ** 2)
+
+
+def generate_rows(
+    instruments: list[Row],
+    dates: list[date],
+    rng: np.random.Generator,
+    volume_high: int | None = None,
+) -> list[Row]:
     """Generate plausible OHLCV rows with rounding-safe intra-day ranges."""
+    if volume_high is None:
+        volume_high = volume_ceiling(len(dates) * len(instruments), 0)
     rows: list[Row] = []
+    anchors: dict[str, float] = {}
     last_close: dict[str, float] = {}
     for day in dates:
         for item in instruments:
             symbol = item["symbol"]
-            base = last_close.get(symbol, float(rng.uniform(20, 150)))
-            close = max(1.0, base * float(rng.normal(1.0, 0.02)))
+            if symbol not in anchors:
+                anchors[symbol] = float(rng.uniform(20, 150))
+            anchor = anchors[symbol]
+            base = last_close.get(symbol, anchor)
+            # Mean-reverting walk: keeps each symbol near its anchor instead of
+            # drifting to the 1.0 floor, where thousands of prices would collide.
+            pull = PRICE_REVERSION * (anchor / base - 1.0)
+            close = max(1.0, base * (1.0 + pull + float(rng.normal(0.0, 0.02))))
             open_price = max(1.0, close * float(rng.normal(1.0, 0.005)))
             high = max(open_price, close) * float(rng.uniform(1.0001, 1.02))
             low = min(open_price, close) * float(rng.uniform(0.98, 0.9999))
             adjusted = close * float(rng.uniform(0.99, 0.999))
-            volume = int(rng.integers(1_000, 10_000_000))
+            volume = int(rng.integers(1_000, volume_high))
             last_close[symbol] = close
             row = {
                 "exchange": item["exchange"],
@@ -198,11 +232,11 @@ def generate_rows(instruments: list[Row], dates: list[date], rng: np.random.Gene
                     SESSIONS.get(item["timezone"], DEFAULT_SESSION)[1],
                     tzinfo=ZoneInfo(item["timezone"]),
                 ).isoformat(),
-                "open": round(open_price, 4),
-                "high": round(high, 4),
-                "low": round(low, 4),
-                "close": round(close, 4),
-                "adjusted_close": round(adjusted, 4),
+                "open": round(open_price, PRICE_DECIMALS),
+                "high": round(high, PRICE_DECIMALS),
+                "low": round(low, PRICE_DECIMALS),
+                "close": round(close, PRICE_DECIMALS),
+                "adjusted_close": round(adjusted, PRICE_DECIMALS),
                 "volume": volume,
             }
             _assert_clean(row)
@@ -239,11 +273,11 @@ def make_dirty_rows(rows: list[Row], rng: np.random.Generator) -> list[Row]:
         elif kind == "bad_type":
             row["volume"] = "12k"
         elif kind == "malformed_number":
-            row["open"] = f"{row['open']:,.4f}"
+            row["open"] = f"{row['open']:,.{PRICE_DECIMALS}f}"
         elif kind == "empty_string":
             row["adjusted_close"] = ""
         elif kind == "negative_price":
-            row["low"] = round(row["low"] - row["close"] * 2, 4)
+            row["low"] = round(row["low"] - row["close"] * 2, PRICE_DECIMALS)
         elif kind == "date_mismatch":
             # `date` disagrees with the exchange-local date of `timestamp`.
             row["date"] = (date.fromisoformat(row["date"]) + timedelta(days=1)).isoformat()
@@ -277,11 +311,11 @@ def generate_ticks(rows: list[Row], ticks_per_day: int, rng: np.random.Generator
         prices[0], prices[-1] = row["open"], row["close"]
         hi_idx, lo_idx = rng.choice(np.arange(1, ticks_per_day - 1), size=2, replace=False)
         prices[hi_idx], prices[lo_idx] = row["high"], row["low"]
-        prices = np.round(prices, 4)
+        prices = np.round(prices, PRICE_DECIMALS)
         volume = int(row["volume"])
-        sizes = 1 + rng.multinomial(
-            volume - ticks_per_day, np.full(ticks_per_day, 1.0 / ticks_per_day)
-        )
+        # Uneven (Dirichlet) trade sizes instead of near-identical ones.
+        weights = rng.dirichlet(np.ones(ticks_per_day))
+        sizes = 1 + rng.multinomial(volume - ticks_per_day, weights)
         for i in range(ticks_per_day):
             ticks.append(
                 {
@@ -303,13 +337,48 @@ def write_csv(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None
     pd.DataFrame(rows, columns=pd.Index(columns)).to_csv(path, index=False)
 
 
-def write_json(rows: list[Row], path: Path) -> None:
-    payload = [{key: row.get(key) for key in COLUMNS} for row in rows]
+def write_json(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None:
+    payload = [{key: row.get(key) for key in columns} for row in rows]
     _ = path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def write_jsonl(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None:
+    """Write one JSON object per line, using the selected columns."""
+    lines = [json.dumps({key: row.get(key) for key in columns}) for row in rows]
+    text = "\n".join(lines)
+    if text:
+        text += "\n"
+    _ = path.write_text(text, encoding="utf-8")
 
 
 def write_xlsx(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None:
     pd.DataFrame(rows, columns=pd.Index(columns)).to_excel(path, index=False)
+
+
+RowWriter = Callable[[list[Row], Path, list[str]], None]
+WRITERS: dict[str, RowWriter] = {
+    "csv": write_csv,
+    "json": write_json,
+    "jsonl": write_jsonl,
+    "xlsx": write_xlsx,
+}
+
+
+def write_payload(
+    output_dir: Path,
+    stem: str,
+    rows: list[Row],
+    columns: list[str],
+    counts: dict[str, int],
+) -> None:
+    """Write one dataset as CSV, JSON, JSONL, and XLSX."""
+    for extension, writer in WRITERS.items():
+        if extension == "xlsx" and len(rows) > XLSX_MAX_ROWS:
+            logger.warning("Skipping %s.xlsx: %d rows exceeds Excel limit", stem, len(rows))
+            continue
+        name = f"{stem}.{extension}"
+        writer(rows, output_dir / name, columns)
+        counts[name] = len(rows)
 
 
 def resolve_row_target(symbols: int, days: int, exponent: int | None, base: int) -> tuple[int, int]:
@@ -332,10 +401,11 @@ def generate(
     base: int = 10,
     ticks_per_day: int = 0,
 ) -> dict[str, int]:
-    """Write clean and dirty fixtures in all three formats; return row counts.
+    """Write clean, dirty, and optional tick fixtures; return row counts.
 
-    With `exponent`, exactly base**exponent clean rows are produced.
-    File names are stamped with the UTC run time, e.g.
+    Clean and dirty market data, and ticks when requested, are written as CSV,
+    JSON, JSONL, and XLSX. With `exponent`, exactly base**exponent clean rows
+    are produced. File names are stamped with the UTC run time, e.g.
     synthetic_market_clean_20261109T101500Z.csv.
     """
     resolved_seed = seed if seed is not None else secrets.randbits(32)
@@ -352,38 +422,18 @@ def generate(
         raise ValueError(
             "Too many days for the calendar; raise --symbols or lower --exponent."
         ) from exc
-    rows = generate_rows(instruments, dates, rng)[:target_rows]
+    volume_high = volume_ceiling(target_rows, ticks_per_day)
+    rows = generate_rows(instruments, dates, rng, volume_high)[:target_rows]
     dirty_rows = make_dirty_rows(rows, rng)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     counts: dict[str, int] = {}
-    writers = {"csv": write_csv, "json": write_json, "xlsx": write_xlsx}
-    payloads = {"clean": rows, "dirty": dirty_rows}
-    for extension, writer in writers.items():
-        for label, payload in payloads.items():
-            if extension == "xlsx" and len(payload) > XLSX_MAX_ROWS:
-                logger.warning("Skipping %s xlsx: %d rows exceeds Excel limit", label, len(payload))
-                continue
-            name = f"synthetic_market_{label}_{run_stamp}.{extension}"
-            writer(payload, out / name)
-            counts[name] = len(payload)
-
-    # Optional tick fixture, separate from the daily schema.
+    write_payload(out, f"synthetic_market_clean_{run_stamp}", rows, COLUMNS, counts)
+    write_payload(out, f"synthetic_market_dirty_{run_stamp}", dirty_rows, COLUMNS, counts)
     if ticks_per_day > 0:
         ticks = generate_ticks(rows, ticks_per_day, rng)
-        name = f"synthetic_ticks_{run_stamp}.csv"
-        write_csv(ticks, out / name, columns=TICK_COLUMNS)
-        counts[name] = len(ticks)
-
-    # Empty fixtures: parsers must reject these without confusing schemas.
-    for extension in ("csv", "json", "xlsx"):
-        name = f"synthetic_market_empty_{run_stamp}.{extension}"
-        counts[name] = 0
-        if extension == "xlsx":
-            write_xlsx([], out / name)
-        else:
-            _ = (out / name).write_bytes(b"")
+        write_payload(out, f"synthetic_ticks_{run_stamp}", ticks, TICK_COLUMNS, counts)
 
     # Unexpected extra column appended to an otherwise valid subset.
     unexpected = [dict(row, unexpected_extra="ignore-me") for row in rows[: max(len(rows) // 4, 1)]]
@@ -408,7 +458,9 @@ class Args(argparse.Namespace):
 
 def parse_args(argv: list[str] | None = None) -> Args:
     parser = argparse.ArgumentParser(
-        description="Generate synthetic OHLCV fixtures (clean and dirty) in CSV, JSON, and XLSX."
+        description=(
+            "Generate synthetic OHLCV and tick fixtures in CSV, JSON, JSONL, and XLSX."
+        )
     )
     _ = parser.add_argument(
         "--symbols", type=int, default=5, help="number of instruments (default: 5)"
@@ -435,7 +487,10 @@ def parse_args(argv: list[str] | None = None) -> Args:
         "--ticks-per-day",
         type=int,
         default=0,
-        help=f"also write a tick-level CSV with this many trades per daily candle (4-{MAX_TICKS_PER_DAY}; default: 0 = no ticks)",
+        help=(
+            "also write tick CSV, JSON, JSONL, and XLSX with this many trades "
+            f"per daily candle (4-{MAX_TICKS_PER_DAY}; default: 0 = no ticks)"
+        ),
     )
     _ = parser.add_argument(
         "--seed",

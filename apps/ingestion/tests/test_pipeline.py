@@ -6,15 +6,18 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from django.contrib.auth.models import User
 from django.utils import timezone
 
 from apps.audit.models import AuditAction, AuditEvent
 from apps.exchanges.models import Exchange
+from apps.ingestion.finalize import finalize_ingestion
 from apps.ingestion.models import (
     DataType,
     Ingestion,
     IngestionState,
     StorageBackend,
+    StorageFile,
 )
 from apps.ingestion.pipeline import run_conversion_pipeline
 from apps.ingestion.staging import (
@@ -148,3 +151,66 @@ def test_delete_staging_never_removes_source(rule, inbox: Path, write_file) -> N
     delete_staging(ingestion)
     assert source.is_file()
     assert not staging.exists()
+
+
+def _system_ingestion(rule, owner: User, settings, *, accepted: int, rejected: int) -> tuple[Ingestion, Path]:
+    key = f"users/{owner.pk}/files/ticks.csv"
+    path = Path(settings.INGESTION_SYSTEM_ROOT) / key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("tick\n", encoding="utf-8")
+    stored = StorageFile.objects.create(
+        owner=owner,
+        storage_backend=StorageBackend.LOCAL,
+        storage_key=key,
+        original_filename="ticks.csv",
+        file_size=path.stat().st_size,
+        content_hash="f" * 64,
+        detected_format="csv",
+    )
+    ingestion = Ingestion.objects.create(
+        rule=rule,
+        owner=owner,
+        storage_file=stored,
+        storage_backend=StorageBackend.LOCAL,
+        object_key="ticks.csv",
+        file_name="ticks.csv",
+        file_size_bytes=path.stat().st_size,
+        file_modified_at=timezone.now(),
+        content_hash="f" * 64,
+        data_type=DataType.TICK_DATA,
+        state=IngestionState.PROCESSING,
+        accepted_rows=accepted,
+        rejected_rows=rejected,
+    )
+    staging = staging_dir_for(ingestion)
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "chunk_000001.csv").write_text("a\n1\n", encoding="utf-8")
+    return ingestion, path
+
+
+@pytest.mark.django_db
+def test_success_deletes_system_copy_and_staging(rule, ingestion_root, settings) -> None:
+    _ = ingestion_root
+    owner = User.objects.create_user(username="filer", password="pass-word-123")
+    ingestion, path = _system_ingestion(rule, owner, settings, accepted=2, rejected=0)
+
+    finalize_ingestion(ingestion)
+
+    assert not path.exists()
+    assert not staging_dir_for(ingestion).exists()
+    stored = ingestion.storage_file
+    assert stored is not None
+    stored.refresh_from_db()
+    assert stored.is_active is False
+
+
+@pytest.mark.django_db
+def test_failed_ingestion_keeps_system_copy(rule, ingestion_root, settings) -> None:
+    _ = ingestion_root
+    owner = User.objects.create_user(username="filer-2", password="pass-word-123")
+    ingestion, path = _system_ingestion(rule, owner, settings, accepted=0, rejected=2)
+
+    finalize_ingestion(ingestion)
+
+    assert path.is_file()
+    assert staging_dir_for(ingestion).is_dir()

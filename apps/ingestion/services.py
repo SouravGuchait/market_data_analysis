@@ -248,7 +248,7 @@ def source_storage_key(ingestion: Ingestion) -> str:
 
     Uploads keep the key on ``StorageFile``. A scan of a file that was never
     uploaded uses the rule location plus the object key. The result stays
-    relative to ``INGESTION_LOCAL_ROOT``.
+    relative to the system root for ``users/`` keys and the local root otherwise.
     """
 
     storage_file = ingestion.storage_file
@@ -710,11 +710,10 @@ def scan_enabled_rules(
 ) -> list[RuleScanResult]:
     """Scan every enabled administrative rule that is due.
 
-    Rules owned by a user are excluded. Those rules are scanned only through
-    the authenticated manual scan API.
+    Rules owned by a user are excluded. User files are queued by import.
 
-    ``force`` bypasses the per-rule scan interval and is used by manual
-    operations and tests; it is not exposed as an API parameter.
+    ``force`` bypasses the per-rule scan interval and is used by tests.
+    It is not exposed as an API parameter.
     """
 
     scan_time = now or timezone.now()

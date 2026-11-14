@@ -1,4 +1,4 @@
-"""Authenticated file upload, rules, manual scan and dispatch."""
+"""Authenticated file upload, rules, import queue and retry."""
 
 from __future__ import annotations
 
@@ -9,12 +9,21 @@ from unittest.mock import patch
 import pytest
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.test import APIClient
 
 from apps.audit.models import AuditAction, AuditEvent
-from apps.ingestion.models import Ingestion, IngestionRule, IngestionState, StorageFile
+from apps.ingestion.models import (
+    Ingestion,
+    IngestionRule,
+    IngestionState,
+    StorageBackend,
+    StorageFile,
+)
 from apps.ingestion.s3_source import RemoteObject
 from apps.ingestion.tasks import scan_enabled_ingestion_rules
 
@@ -136,14 +145,6 @@ def _create_rule(client: APIClient, body: dict[str, object] | None = None) -> di
     return _data_dict(response)
 
 
-def _scan(client: APIClient, rule_id: str) -> dict[str, object]:
-    response = _response(
-        client.post(reverse("ingestion-scan"), {"rule_id": rule_id}, format="json")
-    )
-    assert response.status_code == 200, response.content
-    return _data_dict(response)
-
-
 def test_jsonl_import_is_accepted(auth_client: APIClient, ingestion_root: Path) -> None:
     body = _import_files(
         auth_client,
@@ -191,9 +192,10 @@ def test_import_stores_multiple_files_under_the_user_directory(
         file_id = item.get("id")
         assert isinstance(key, str)
         assert isinstance(file_id, str)
-        assert key.startswith(f"users/{user.pk}/market/")
+        assert key.startswith(f"users/{user.pk}/files/")
         assert settings.INGESTION_LOCAL_ROOT not in key
-        assert (ingestion_root / key).is_file()
+        assert (Path(settings.INGESTION_SYSTEM_ROOT) / key).is_file()
+        assert not (ingestion_root / key).exists()
         assert not (ingestion_root / "alpha.csv").exists()
         first_id = first_id or file_id
     event = AuditEvent.objects.get(actor=user, resource_id=first_id)
@@ -239,12 +241,18 @@ def test_import_skips_unsafe_files(
 
 
 def test_rules_are_owner_scoped(
-    auth_client: APIClient, other_client: APIClient, user: User, ingestion_root
+    auth_client: APIClient,
+    other_client: APIClient,
+    user: User,
+    ingestion_root,
+    settings,
 ) -> None:
     created = _create_rule(auth_client)
-    assert created["storage_prefix"] == "market"
+    assert created["storage_prefix"] == "files"
     assert "location_reference" not in created
-    assert (ingestion_root / "users" / str(user.pk) / "market").is_dir()
+    system_files = Path(settings.INGESTION_SYSTEM_ROOT) / "users" / str(user.pk) / "files"
+    assert system_files.is_dir()
+    assert not (ingestion_root / "users").exists()
 
     own_list = _response(auth_client.get(reverse("ingestion-rule-list")))
     assert own_list.status_code == 200
@@ -276,17 +284,21 @@ def test_rules_are_owner_scoped(
     )
 
 
-def test_rule_create_builds_a_missing_ingestion_root(
-    auth_client: APIClient, ingestion_root: Path
+def test_rule_create_builds_a_missing_system_root(
+    auth_client: APIClient,
+    ingestion_root: Path,
+    settings,
 ) -> None:
-    ingestion_root.rmdir()
+    system = Path(settings.INGESTION_SYSTEM_ROOT)
+    system.rmdir()
 
     created = _response(
         auth_client.post(reverse("ingestion-rule-list"), _rule_body(), format="json")
     )
 
     assert created.status_code == 201
-    assert ingestion_root.is_dir()
+    assert system.is_dir()
+    assert not (ingestion_root / "users").exists()
 
 
 def test_import_creates_a_missing_local_directory(
@@ -306,167 +318,18 @@ def test_import_creates_a_missing_local_directory(
     assert ingestion_root.is_dir()
 
 
-def test_manual_scan_defers_unstable_files_and_queues_them_on_the_next_scan(
+def test_import_gives_each_file_its_own_ingestion(
     auth_client: APIClient,
     ingestion_root,
 ) -> None:
-    _import_files(auth_client, ingestion_root, _csv("synthetic_market.csv"))
-    rule = _create_rule(auth_client)
-
-    first = _scan(auth_client, _text_field(rule, "id"))
-    assert first["discovered_count"] == 1
-    assert first["queued_count"] == 0
-    assert first["skipped_count"] == 1
-    assert Ingestion.objects.count() == 0
-
-    second = _scan(auth_client, _text_field(rule, "id"))
-    assert second["queued_count"] == 1
-    ingestion = Ingestion.objects.get()
-    assert ingestion.state == IngestionState.QUEUED
-    assert ingestion.celery_task_id == ""
-    assert ingestion.file_name == "synthetic_market.csv"
-    assert ingestion.owner == IngestionRule.objects.get().owner
-
-
-def test_many_files_receive_separate_ingestion_ids(
-    auth_client: APIClient,
-    ingestion_root,
-) -> None:
+    _create_rule(auth_client)
     files = [
         _csv(f"market-{index:02}.csv", f"symbol,close\nA,{index}\n".encode()) for index in range(11)
     ]
     _import_files(auth_client, ingestion_root, *files)
-    rule = _create_rule(auth_client)
-    _scan(auth_client, _text_field(rule, "id"))
-    second = _scan(auth_client, _text_field(rule, "id"))
 
-    assert second["discovered_count"] == 11
-    assert second["queued_count"] == 11
     assert Ingestion.objects.count() == 11
     assert Ingestion.objects.values("id").distinct().count() == 11
-
-
-def test_dispatch_waits_for_commit_and_does_not_repeat(
-    auth_client: APIClient,
-    ingestion_root,
-    django_capture_on_commit_callbacks,
-) -> None:
-    _import_files(auth_client, ingestion_root, _csv("one.csv"))
-    rule = _create_rule(auth_client)
-    _scan(auth_client, _text_field(rule, "id"))
-    _scan(auth_client, _text_field(rule, "id"))
-    ingestion = Ingestion.objects.get()
-
-    with django_capture_on_commit_callbacks(execute=False) as callbacks:
-        held = _response(auth_client.post(reverse("ingestion-dispatch"), {}, format="json"))
-
-    assert held.status_code == 200
-    assert _data_dict(held)["queued"] == 1
-    ingestion.refresh_from_db()
-    assert ingestion.celery_task_id == ""
-    assert callbacks
-
-    dispatched: list[str] = []
-
-    def delay(ingestion_id: str) -> _DelayedTask:
-        dispatched.append(ingestion_id)
-        return _DelayedTask("task-1")
-
-    with (
-        patch("apps.ingestion.tasks.process_ingestion_file.delay", side_effect=delay),
-        django_capture_on_commit_callbacks(execute=True),
-    ):
-        for callback in callbacks:
-            callback()
-
-    ingestion.refresh_from_db()
-    assert dispatched == [str(ingestion.pk)]
-    assert ingestion.celery_task_id == "task-1"
-
-    with (
-        patch("apps.ingestion.tasks.process_ingestion_file.delay", side_effect=delay),
-        django_capture_on_commit_callbacks(execute=True),
-    ):
-        repeated = _response(auth_client.post(reverse("ingestion-dispatch"), {}, format="json"))
-
-    repeated_data = _data_dict(repeated)
-    assert repeated_data["queued"] == 0
-    assert repeated_data["skipped"] == 1
-    assert dispatched == [str(ingestion.pk)]
-
-
-def test_scan_and_dispatch_accept_the_names_the_user_created(
-    auth_client: APIClient,
-    ingestion_root,
-    django_capture_on_commit_callbacks,
-) -> None:
-    _import_files(auth_client, ingestion_root, _csv("one.csv"))
-    _create_rule(auth_client, _rule_body("Daily candles"))
-    first = _scan(auth_client, "Daily candles")
-    assert first["queued_count"] == 0
-    assert first["rule_name"] == "Daily candles"
-    assert _scan(auth_client, "Daily candles")["queued_count"] == 1
-
-    with (
-        patch(
-            "apps.ingestion.tasks.process_ingestion_file.delay",
-            return_value=_DelayedTask("named-1"),
-        ),
-        django_capture_on_commit_callbacks(execute=True),
-    ):
-        response = _response(
-            auth_client.post(
-                reverse("ingestion-dispatch"),
-                {"ingestion_ids": ["one.csv"]},
-                format="json",
-            )
-        )
-
-    assert response.status_code == 200
-    references = _data_dict(response)["ingestion_ids"]
-    assert isinstance(references, list)
-    named = references[0]
-    assert isinstance(named, dict)
-    assert named.get("name") == "one.csv"
-    assert named.get("id") == str(Ingestion.objects.get().pk)
-
-
-def test_duplicate_names_are_rejected(
-    auth_client: APIClient,
-    ingestion_root,
-) -> None:
-    _create_rule(auth_client, _rule_body("Shared", "market"))
-    _create_rule(auth_client, _rule_body("Shared", "ticks"))
-    scan = _response(
-        auth_client.post(reverse("ingestion-scan"), {"rule_id": "Shared"}, format="json")
-    )
-    assert scan.status_code == 400
-
-    _import_files(
-        auth_client,
-        ingestion_root,
-        _csv("one.csv", b"symbol,close\nA,1\n"),
-        prefix="market",
-    )
-    _import_files(
-        auth_client,
-        ingestion_root,
-        _csv("one.csv", b"symbol,close\nB,2\n"),
-        prefix="other",
-    )
-    other = _create_rule(auth_client, _rule_body("Unique other", "other"))
-    rule = _create_rule(auth_client, _rule_body("Unique daily"))
-    for rule_id in (_text_field(other, "id"), _text_field(rule, "id")):
-        _scan(auth_client, rule_id)
-        _scan(auth_client, rule_id)
-    dispatch = _response(
-        auth_client.post(
-            reverse("ingestion-dispatch"),
-            {"ingestion_ids": ["one.csv"]},
-            format="json",
-        )
-    )
-    assert dispatch.status_code == 400
 
 
 def test_filters_pagination_and_cross_user_detail(
@@ -474,17 +337,17 @@ def test_filters_pagination_and_cross_user_detail(
     other_client: APIClient,
     ingestion_root,
 ) -> None:
-    _import_files(auth_client, ingestion_root, _csv("daily.csv"), prefix="market")
-    _import_files(
-        auth_client, ingestion_root, _csv("ticks.csv", b"price,qty\n1,2\n"), prefix="ticks"
-    )
-    daily = _create_rule(auth_client, _rule_body("Daily", "market"))
-    tick_body = _rule_body("Ticks", "ticks")
+    daily_body = _rule_body("Daily", "files")
+    daily_body["file_pattern"] = "daily.csv"
+    _create_rule(auth_client, daily_body)
+    tick_body = _rule_body("Ticks", "files")
     tick_body["data_type"] = "TICK_DATA"
-    ticks = _create_rule(auth_client, tick_body)
-    for rule_id in (_text_field(daily, "id"), _text_field(ticks, "id")):
-        _scan(auth_client, rule_id)
-        _scan(auth_client, rule_id)
+    tick_body["file_pattern"] = "ticks.csv"
+    _create_rule(auth_client, tick_body)
+    _import_files(auth_client, ingestion_root, _csv("daily.csv"), prefix="files")
+    _import_files(
+        auth_client, ingestion_root, _csv("ticks.csv", b"price,qty\n1,2\n"), prefix="files"
+    )
 
     filtered = _response(
         auth_client.get(
@@ -525,26 +388,14 @@ def test_filters_pagination_and_cross_user_detail(
     assert rejections.status_code == 200
     assert _data_dict(rejections)["results"] == []
 
-    foreign_dispatch = _response(
-        other_client.post(
-            reverse("ingestion-dispatch"),
-            {"ingestion_ids": [ingestion_id]},
-            format="json",
-        )
-    )
-    assert foreign_dispatch.status_code == 200
-    assert _data_dict(foreign_dispatch)["queued"] == 0
-
 
 def test_retry_is_limited_to_the_owner_failed_ingestion(
     auth_client: APIClient,
     ingestion_root,
     django_capture_on_commit_callbacks,
 ) -> None:
+    _create_rule(auth_client)
     _import_files(auth_client, ingestion_root, _csv("retry.csv"))
-    rule = _create_rule(auth_client)
-    _scan(auth_client, _text_field(rule, "id"))
-    _scan(auth_client, _text_field(rule, "id"))
     ingestion = Ingestion.objects.get()
     ingestion.state = IngestionState.FAILED
     ingestion.error_summary = "dispatch failed"
@@ -595,55 +446,21 @@ def test_scheduler_does_not_scan_user_owned_rules(
     assert Ingestion.objects.filter(owner=user).count() == 0
 
 
-def test_duplicate_scan_does_not_create_a_second_ingestion(
+def test_disabled_rule_does_not_queue_an_import(
     auth_client: APIClient,
-    ingestion_root,
-) -> None:
-    _import_files(auth_client, ingestion_root, _csv("once.csv"))
-    rule = _create_rule(auth_client)
-    _scan(auth_client, _text_field(rule, "id"))
-    _scan(auth_client, _text_field(rule, "id"))
-    third = _scan(auth_client, _text_field(rule, "id"))
-
-    assert third["queued_count"] == 0
-    assert third["skipped_count"] == 1
-    assert Ingestion.objects.count() == 1
-
-
-def test_disabled_rule_and_foreign_rule_are_rejected(
-    auth_client: APIClient,
-    other_client: APIClient,
     ingestion_root,
 ) -> None:
     rule = _create_rule(auth_client)
     IngestionRule.objects.filter(pk=_text_field(rule, "id")).update(is_enabled=False)
-    disabled = _response(
-        auth_client.post(
-            reverse("ingestion-scan"),
-            {"rule_id": _text_field(rule, "id")},
-            format="json",
-        )
-    )
-    assert disabled.status_code == 400
-
-    missing = _response(
-        other_client.post(
-            reverse("ingestion-scan"),
-            {"rule_id": _text_field(rule, "id")},
-            format="json",
-        )
-    )
-    assert missing.status_code == 404
-    bare = _response(
-        auth_client.post(reverse("ingestion-scan"), {"path": "/tmp/data"}, format="json")
-    )
-    assert bare.status_code == 400
+    _import_files(auth_client, ingestion_root, _csv("held.csv"))
+    assert Ingestion.objects.count() == 0
 
 
 def test_import_copies_every_configured_local_file(
     auth_client: APIClient,
     user: User,
     ingestion_root,
+    settings,
 ) -> None:
     (ingestion_root / "synthetic_market_clean.csv").write_bytes(b"symbol,close\nACME,1\n")
     (ingestion_root / "synthetic_market_clean.json").write_text(
@@ -674,7 +491,9 @@ def test_import_copies_every_configured_local_file(
             names.append(filename)
     names = sorted(names)
     assert names == ["synthetic_market_clean.csv", "synthetic_market_clean.json"]
-    copied = ingestion_root / "users" / str(user.pk) / "daily" / "synthetic_market_clean.csv"
+    copied = (
+        Path(settings.INGESTION_SYSTEM_ROOT) / "users" / str(user.pk) / "files" / "synthetic_market_clean.csv"
+    )
     assert copied.is_file()
 
     again = _response(
@@ -742,3 +561,106 @@ def test_import_rejects_s3_when_the_bucket_is_not_configured(
         )
     )
     assert response.status_code == 400
+
+
+def test_import_queues_a_matching_rule_and_removes_the_upload(
+    auth_client: APIClient,
+    user: User,
+    ingestion_root: Path,
+    settings,
+) -> None:
+    _create_rule(auth_client, _rule_body(name="Daily CSV", prefix="market"))
+    payload = b"exchange,symbol,close\nXNYS,ACME,1\n"
+    (ingestion_root / "alpha.csv").write_bytes(payload)
+    response = _response(
+        auth_client.post(
+            reverse("ingestion-file-import"),
+            {"storage_backends": ["local"], "storage_prefix": "market"},
+            format="json",
+        )
+    )
+    assert response.status_code == 201
+    stored_path = Path(settings.INGESTION_SYSTEM_ROOT) / "users" / str(user.pk) / "files" / "alpha.csv"
+    assert stored_path.is_file()
+    assert not (ingestion_root / "alpha.csv").exists()
+    queued = _data_dict(response)["queued"]
+    assert isinstance(queued, list)
+    assert len(queued) == 1
+    assert Ingestion.objects.filter(
+        owner=user, file_name="alpha.csv", state=IngestionState.QUEUED
+    ).count() == 1
+    _import_files(auth_client, ingestion_root, _csv("alpha.csv", payload))
+    assert Ingestion.objects.filter(owner=user, file_name="alpha.csv").count() == 1
+
+
+def test_validation_rule_set_can_be_created(
+    auth_client: APIClient,
+) -> None:
+    response = _response(
+        auth_client.post(
+            reverse("ingestion-validation-rule-set-create"),
+            {
+                "name": "daily-strict",
+                "data_type": "DAILY_OHLCV",
+                "version": "1",
+                "rules": [
+                    {"field_name": "close", "validator": "NUMERIC", "sort_order": 1},
+                ],
+            },
+            format="json",
+        )
+    )
+    assert response.status_code == 201
+    created = _data_dict(response)
+    assert created["name"] == "daily-strict"
+    rules = created["rules"]
+    assert isinstance(rules, list)
+    assert len(rules) == 1
+
+
+def _log_ingestion(rule: IngestionRule, owner: User, name: str, state: str) -> Ingestion:
+    return Ingestion.objects.create(
+        rule=rule,
+        owner=owner,
+        storage_backend=StorageBackend.LOCAL,
+        object_key=name,
+        file_name=name,
+        file_size_bytes=10,
+        file_modified_at=timezone.now(),
+        content_hash=name.encode().hex()[:64].ljust(64, "a"),
+        data_type="DAILY_OHLCV",
+        state=state,
+        accepted_rows=10,
+        rejected_rows=2,
+        duplicate_rows=1,
+        finished_at=timezone.now() if state != IngestionState.QUEUED else None,
+    )
+
+
+def test_processing_log_reads_ingestion_counters_only(
+    auth_client: APIClient,
+    other_client: APIClient,
+    user: User,
+    rule: IngestionRule,
+) -> None:
+    finished = _log_ingestion(rule, user, "done.csv", IngestionState.SUCCESS)
+    _log_ingestion(rule, user, "waiting.csv", IngestionState.QUEUED)
+
+    with CaptureQueriesContext(connection) as captured:
+        response = _response(auth_client.get(reverse("ingestion-logs")))
+
+    sql = " ".join(item["sql"] for item in captured.captured_queries)
+    assert "mda_trades" not in sql
+    assert "mda_daily_ohlcv" not in sql
+    assert response.status_code == 200
+    results = _data_dict(response)["results"]
+    assert isinstance(results, list)
+    assert len(results) == 1
+    row = results[0]
+    assert isinstance(row, dict)
+    assert row["id"] == str(finished.pk)
+    assert row["accepted_rows"] == 10
+    assert row["rejected_rows"] == 2
+    assert row["duplicate_rows"] == 1
+    hidden = _data_dict(_response(other_client.get(reverse("ingestion-logs"))))
+    assert hidden["results"] == []

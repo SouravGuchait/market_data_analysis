@@ -23,8 +23,11 @@ def clear_throttle_cache() -> None:
 @pytest.fixture
 def ingestion_root(tmp_path: Path, settings) -> Path:
     root = tmp_path / "ingestion-root"
+    system = tmp_path / "system-store"
     root.mkdir()
+    system.mkdir()
     settings.INGESTION_LOCAL_ROOT = str(root)
+    settings.INGESTION_SYSTEM_ROOT = str(system)
     return root
 
 

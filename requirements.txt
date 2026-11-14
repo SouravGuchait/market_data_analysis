@@ -11,7 +11,7 @@ django-zxcvbn-password-validator
 
 # Data, database, and asynchronous work
 mysqlclient>=2.2,<3.0
-celery[redis]>=5.5,<5.7
+celery>=5.5,<5.7
 redis>=5.0,<7.0
 numpy>=1.26,<2.0
 pandas>=2.0,<3.0

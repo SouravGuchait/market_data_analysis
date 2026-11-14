@@ -10,10 +10,17 @@ from pathlib import Path
 from django.conf import settings
 from django.contrib.auth.models import User
 
-from .models import SUPPORTED_FILE_FORMATS, StorageBackend, StorageFile
+from .models import SUPPORTED_FILE_FORMATS, Ingestion, StorageBackend, StorageFile
+from .queue_upload import queue_uploaded_file, upload_is_registered
 from .s3_source import RemoteObject, list_remote_objects, open_remote_object
 from .storage import ByteStream, LocalStorageAdapter, StorageError, StorageLimitError
-from .user_services import IngestionRequestError, _checked_filename, _checked_prefix, _user_location
+from .user_services import (
+    IngestionRequestError,
+    _checked_filename,
+    _checked_prefix,
+    _user_location,
+    user_files_location,
+)
 
 IMPORT_BACKENDS = ("local", "s3")
 
@@ -24,10 +31,18 @@ class ImportSkip:
     reason: str
 
 
+@dataclass(frozen=True)
+class QueuedImport:
+    name: str
+    ingestion_id: str
+    rule_id: str
+
+
 @dataclass
 class ImportBatch:
     stored: list[StorageFile]
     skipped: list[ImportSkip]
+    queued: list[QueuedImport]
 
 
 class _PathStream:
@@ -46,6 +61,10 @@ class LocalImportFile:
         self.size_bytes = path.stat().st_size
         self.content_hash = _hash_file(path)
         self._path = path
+
+    @property
+    def path(self) -> Path:
+        return self._path
 
     def open(self) -> ByteStream:
         return _PathStream(self._path)
@@ -78,15 +97,60 @@ def import_configured_files(
     if len(files) > limit:
         raise _limit_error(limit)
 
-    adapter = LocalStorageAdapter(settings.INGESTION_LOCAL_ROOT, "")
-    batch = ImportBatch(stored=[], skipped=[])
+    adapter = LocalStorageAdapter(settings.INGESTION_SYSTEM_ROOT, "")
+    batch = ImportBatch(stored=[], skipped=[], queued=[])
     for source in files:
-        record, reason = _store_source(adapter, owner, source, prefix)
-        if record is None:
-            batch.skipped.append(ImportSkip(name=source.name, reason=reason))
-        else:
-            batch.stored.append(record)
+        _import_one(adapter, owner, source, prefix, batch)
     return batch
+
+
+def _import_one(
+    adapter: LocalStorageAdapter,
+    owner: User,
+    source: LocalImportFile | S3ImportFile,
+    prefix: str,
+    batch: ImportBatch,
+) -> None:
+    record, reason = _store_source(adapter, owner, source, prefix)
+    stored = record or _existing_copy(owner, source, reason)
+    queued = queue_uploaded_file(owner, stored) if stored is not None else []
+    if queued or (stored is not None and upload_is_registered(owner, stored)):
+        _remove_upload_source(source)
+    if record is None:
+        batch.skipped.append(ImportSkip(name=source.name, reason=reason))
+    else:
+        batch.stored.append(record)
+    batch.queued.extend(_queued_rows(queued))
+
+
+def _queued_rows(queued: list[Ingestion]) -> list[QueuedImport]:
+    return [
+        QueuedImport(name=item.file_name, ingestion_id=str(item.pk), rule_id=str(item.rule.pk))
+        for item in queued
+    ]
+
+
+def _existing_copy(
+    owner: User,
+    source: LocalImportFile | S3ImportFile,
+    reason: str,
+) -> StorageFile | None:
+    if reason != "Already stored.":
+        return None
+    storage_key = f"{user_files_location(owner)}/{source.name}"
+    return StorageFile.objects.filter(owner=owner, storage_key=storage_key, is_active=True).first()
+
+
+def _remove_upload_source(source: LocalImportFile | S3ImportFile) -> None:
+    if not isinstance(source, LocalImportFile):
+        return
+    root = Path(settings.INGESTION_LOCAL_ROOT).expanduser().resolve()
+    path = source.path.resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return
+    relative = path.relative_to(root)
+    if relative.parts and relative.parts[0] != "users":
+        path.unlink()
 
 
 def _selected_backends(backends: Sequence[str]) -> list[str]:

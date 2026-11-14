@@ -36,6 +36,24 @@ services:
       timeout: 5s
       retries: 10
 
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Set RABBITMQ_USER in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}
+    ports:
+      - "${RABBITMQ_HOST_PORT:?Set RABBITMQ_HOST_PORT in .env}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:?Set RABBITMQ_MANAGEMENT_PORT in .env}:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
   web:
     build:
       context: .
@@ -55,7 +73,9 @@ services:
       CELERY_RESULT_BACKEND: ${COMPOSE_CELERY_RESULT_BACKEND:?Set COMPOSE_CELERY_RESULT_BACKEND in .env}
       LOG_FILE_PATH: /var/log/mda/app.log
       INGESTION_LOCAL_ROOT: /data/ingestion
+      INGESTION_SYSTEM_ROOT: /var/lib/mda/system
       INGESTION_SCAN_INTERVAL_SECONDS: ${INGESTION_SCAN_INTERVAL_SECONDS:-60}
+      INGESTION_MAX_UPLOAD_BYTES: ${INGESTION_MAX_UPLOAD_BYTES:-1073741824}
       INGESTION_S3_BUCKET: ${INGESTION_S3_BUCKET:-}
       INGESTION_S3_PREFIX: ${INGESTION_S3_PREFIX:-}
       INGESTION_S3_REGION: ${INGESTION_S3_REGION:-}
@@ -69,10 +89,13 @@ services:
       - .:/app
       - mda_logs:/var/log/mda
       - ./sample_data:/data/ingestion
+      - mda_system:/var/lib/mda/system
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -92,7 +115,14 @@ services:
   worker:
     build:
       context: .
-    command: ["celery", "-A", "config", "worker", "--loglevel=INFO", "--concurrency=2"]
+    # Change CELERY_WORKER_CONCURRENCY in .env to raise or lower the process count.
+    command:
+      - celery
+      - -A
+      - config
+      - worker
+      - --loglevel=INFO
+      - --concurrency=${CELERY_WORKER_CONCURRENCY:?Set CELERY_WORKER_CONCURRENCY in .env}
     environment: *django_environment
     healthcheck:
       disable: true
@@ -100,10 +130,13 @@ services:
       - .:/app
       - mda_logs:/var/log/mda
       - ./sample_data:/data/ingestion
+      - mda_system:/var/lib/mda/system
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
@@ -111,4 +144,6 @@ services:
 volumes:
   mysql_data:
   redis_data:
+  rabbitmq_data:
   mda_logs:
+  mda_system:

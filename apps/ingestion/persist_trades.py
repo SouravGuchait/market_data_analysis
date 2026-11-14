@@ -208,6 +208,22 @@ def _split_duplicates(prepared: list[_ParsedTrade]) -> tuple[list[Trade], int]:
     return to_create, duplicates
 
 
+def _inserted_count(trades: list[Trade]) -> int:
+    found: set[object] = set()
+    identifiers = [trade.pk for trade in trades]
+    for start in range(0, len(identifiers), 500):
+        chunk = identifiers[start : start + 500]
+        found.update(Trade.objects.filter(pk__in=chunk).values_list("pk", flat=True))
+    return sum(1 for trade in trades if trade.pk in found)
+
+
+def _insert_trades(to_create: list[Trade]) -> int:
+    """Insert trades, counting rows lost to a concurrent duplicate as not inserted."""
+
+    Trade.objects.bulk_create(to_create, batch_size=500, ignore_conflicts=True)
+    return _inserted_count(to_create)
+
+
 def persist_trade_dataframe(frame: pd.DataFrame, ingestion: Ingestion) -> TradePersistResult:
     """Insert new trades; existing dedupe keys count as duplicates."""
 
@@ -218,7 +234,6 @@ def persist_trade_dataframe(frame: pd.DataFrame, ingestion: Ingestion) -> TradeP
         frame_out = pd.DataFrame(conflicts) if conflicts else _empty_conflicts()
         return TradePersistResult(0, 0, frame_out)
     to_create, duplicates = _split_duplicates(prepared)
-    if to_create:
-        Trade.objects.bulk_create(to_create, batch_size=500)
+    inserted = _insert_trades(to_create) if to_create else 0
     conflict_frame = pd.DataFrame(conflicts) if conflicts else _empty_conflicts()
-    return TradePersistResult(len(to_create), duplicates, conflict_frame)
+    return TradePersistResult(inserted, duplicates + len(to_create) - inserted, conflict_frame)

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pytest
 from django.contrib.auth.models import User
 from django.utils import timezone
@@ -23,6 +24,7 @@ from apps.ingestion.models import (
     RejectedRow,
     StorageBackend,
 )
+from apps.ingestion.persist_trades import _ParsedTrade, persist_trade_dataframe
 from apps.ingestion.tasks import process_ingestion_file
 from apps.ingestion.worker import run_ingestion_worker
 from apps.instruments.models import Instrument
@@ -224,6 +226,52 @@ def test_tick_persistence_and_dedupe(
     assert ingestion.state == IngestionState.SUCCESS
     assert ingestion.accepted_rows == 1
     assert ingestion.duplicate_rows == 1
+    assert Trade.objects.filter(instrument=instrument).count() == 1
+
+
+def _ingestion_for(rule, name: str) -> Ingestion:
+    return Ingestion.objects.create(
+        rule=rule,
+        storage_backend=StorageBackend.LOCAL,
+        object_key=name,
+        file_name=name,
+        file_size_bytes=10,
+        file_modified_at=timezone.now(),
+        content_hash="c" * 64,
+        data_type=DataType.TICK_DATA,
+        state=IngestionState.QUEUED,
+    )
+
+
+@pytest.mark.django_db
+def test_concurrent_trade_duplicate_is_counted(
+    rule,
+    instrument: Instrument,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "_source_row": 2,
+                "exchange_identifier": "XNYS",
+                "instrument_identifier": "ACME",
+                "event_timestamp": datetime(2024, 1, 2, 20, 30, tzinfo=UTC),
+                "price": Decimal("10.5"),
+                "quantity": Decimal(100),
+                "exchange_trade_id": "T1",
+            }
+        ]
+    )
+    assert persist_trade_dataframe(frame, _ingestion_for(rule, "ticks-a.csv")).inserted == 1
+
+    def _miss_existing(prepared: list[_ParsedTrade]) -> tuple[list[Trade], int]:
+        return [item.trade for item in prepared], 0
+
+    monkeypatch.setattr("apps.ingestion.persist_trades._split_duplicates", _miss_existing)
+    result = persist_trade_dataframe(frame, _ingestion_for(rule, "ticks-b.csv"))
+
+    assert result.inserted == 0
+    assert result.duplicates == 1
     assert Trade.objects.filter(instrument=instrument).count() == 1
 
 
