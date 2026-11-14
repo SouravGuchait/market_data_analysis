@@ -801,7 +801,7 @@ Optional ingestion settings:
 
 - `INGESTION_SCAN_INTERVAL_SECONDS` (default `60`) — Celery Beat discovery cadence for administrative rules.
 - `INGESTION_HASH_CHUNK_SIZE_BYTES` (default `1048576`) — content-hash read size.
-- `INGESTION_MAX_UPLOAD_BYTES` (default `52428800`) — maximum size of one uploaded file.
+- `INGESTION_MAX_UPLOAD_BYTES` (default `1073741824`, 1 GiB) — maximum size of one uploaded file.
 - `INGESTION_MIN_CHUNK_SIZE` (default `1`) — minimum `chunk_size` accepted from the API.
 - `INGESTION_DEFAULT_CHUNK_SIZE` (default `5000`) — row batch size stored on a new user rule when the request omits `chunk_size`.
 - `INGESTION_MAX_CHUNK_SIZE` (default `100000`) — maximum `chunk_size` accepted from the API.
