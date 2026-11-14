@@ -51,6 +51,60 @@ Authentication routes are mounted under `/api/v1/auth/`.
 
 Registration, login, refresh, password-reset request, and confirmation use scoped throttles. JWT refresh rotation and blacklist behavior are configured in SimpleJWT.
 
+Authenticated calls send `Authorization: Bearer <access>`. `GET /api/v1/auth/me/` has no body.
+
+```json
+POST /api/v1/auth/register/
+{
+  "username": "analyst",
+  "email": "analyst@example.com",
+  "password": "Correct-horse-battery-staple-9",
+  "password_confirm": "Correct-horse-battery-staple-9"
+}
+```
+
+```json
+POST /api/v1/auth/login/
+{
+  "username": "analyst",
+  "password": "Correct-horse-battery-staple-9"
+}
+```
+
+`username` accepts the account username or the email.
+
+```json
+POST /api/v1/auth/token/refresh/
+{
+  "refresh": "<refresh-token>"
+}
+```
+
+```json
+POST /api/v1/auth/logout/
+{
+  "refresh": "<refresh-token>"
+}
+```
+
+```json
+POST /api/v1/auth/password-reset/
+{
+  "email": "analyst@example.com"
+}
+```
+
+```json
+POST /api/v1/auth/password-reset/confirm/
+{
+  "token": "<reset-token-from-the-email-link>",
+  "password": "Another-correct-horse-staple-9",
+  "password_confirm": "Another-correct-horse-staple-9"
+}
+```
+
+Confirmation uses `token`, `password`, and `password_confirm`. The new password must pass Django's password validators.
+
 ### Database Schema and Model Relationships
 
 - Shared exchange and instrument records, with per-exchange symbol uniqueness.
@@ -91,16 +145,41 @@ instrument's exchange and must match it when supplied. Sending both forms of the
 same relationship is rejected. Read responses return nested instrument and
 exchange objects.
 
-Example request:
+Create and update a portfolio:
 
 ```json
+POST /api/v1/portfolios/
+{
+  "name": "Core book",
+  "description": "Primary holdings",
+  "status": "active"
+}
+```
+
+```json
+PATCH /api/v1/portfolios/{portfolio_id}/
+{
+  "name": "Core book",
+  "description": "Updated holdings",
+  "status": "active"
+}
+```
+
+`description` and `status` may be omitted. `DELETE` has no body.
+
+Attach one instrument. `ACME` is listed on `XNAS` in the seeded catalog. Send either `instrument_id` or `instrument_symbol`, and either `exchange_id` or `exchange_code`:
+
+```json
+POST /api/v1/portfolios/{portfolio_id}/instruments/
 {
   "instrument_symbol": "ACME",
-  "exchange_code": "XNYS",
+  "exchange_code": "XNAS",
   "alias": "Core holding",
   "is_active": true
 }
 ```
+
+`DELETE /api/v1/portfolios/{portfolio_id}/instruments/{id}/` has no body.
 
 `PortfolioInstrument.exchange` is stored explicitly for the portfolio
 configuration, is backfilled from the instrument by migration `0003`, and is
@@ -405,7 +484,7 @@ Each stored file becomes one Celery task on RabbitMQ. The worker process count i
 | `POST /api/v1/ingestion/validation-rule-sets/` | JSON name, data type, version, and `rules`. | Creates one validation rule set. Attach its `id` when creating an ingestion rule. |
 | `POST /api/v1/ingestion/files/import/` | JSON `{ "storage_backends": ["local", "s3"] }`. Omit the body to read local, and S3 when `INGESTION_S3_BUCKET` is set. | Copies matching files from the local drop folder and S3 into the system volume `users/<caller id>/files/`, queues them, and removes the local original. A file with no matching rule stays in the drop folder. |
 | `GET /api/v1/ingestion/logs/` | No body. Optional `page` and `page_size`. | Returns accepted, rejected and duplicate counts from the ingestion log for the caller's finished files. It does not count rows in the trade or daily candle tables. |
-| `POST /api/v1/ingestion/rules/` | JSON rule body: name, data type, prefix, file pattern, parser config, optional `validation_rule_set_id`. | Creates a rule owned by the authenticated user. The rule watches `users/<user id>/files/`. |
+| `POST /api/v1/ingestion/rules/` | JSON rule body: name, data type, prefix, file pattern, parser config, optional `validation_rule_set_id`. Daily files use `synthetic_market_clean_*.csv`. Tick files use `synthetic_ticks_*.csv`. | Creates a rule owned by the authenticated user. The rule watches `users/<user id>/files/`. |
 | Celery Beat `scan_enabled_ingestion_rules` | No HTTP body. Schedule is `INGESTION_SCAN_INTERVAL_SECONDS`. | Scans administrative rules whose owner is null. It does not scan user-owned rules. User files are queued by import. |
 
 Create instruments that are not already listed, then a validation rule set, then
@@ -461,13 +540,15 @@ POST /api/v1/ingestion/validation-rule-sets/
 Use the returned validation rule set id on the ingestion rule. `storage_prefix`
 is accepted and stored as `files`.
 
+Use `synthetic_market_clean_*.csv` as `file_pattern`. `synthetic_market_*.csv` also copies `synthetic_market_dirty_*.csv`, which is the rejection fixture described below.
+
 ```json
 POST /api/v1/ingestion/rules/
 {
   "name": "ohlcv-csv",
   "data_type": "DAILY_OHLCV",
   "storage_prefix": "files",
-  "file_pattern": "synthetic_market_*.csv",
+  "file_pattern": "synthetic_market_clean_*.csv",
   "chunk_size": 5000,
   "parser_config": {"format": "csv"},
   "instrument_mapping": {"instrument_identifier": "symbol"},
@@ -476,12 +557,154 @@ POST /api/v1/ingestion/rules/
 }
 ```
 
+Tick files need their own rule set and rule. Trade ids in the generator look like `ACME-2024-01-02-0000`.
+
+```json
+POST /api/v1/ingestion/validation-rule-sets/
+{
+  "name": "tick-strict",
+  "data_type": "TICK_DATA",
+  "version": "1",
+  "rules": [
+    {"field_name": "exchange_identifier", "validator": "REQUIRED", "sort_order": 1},
+    {"field_name": "instrument_identifier", "validator": "REQUIRED", "sort_order": 2},
+    {"field_name": "event_timestamp", "validator": "DATETIME", "sort_order": 3},
+    {"field_name": "price", "validator": "NUMERIC", "sort_order": 4},
+    {"field_name": "price", "validator": "POSITIVE", "sort_order": 5},
+    {"field_name": "quantity", "validator": "NUMERIC", "sort_order": 6},
+    {"field_name": "quantity", "validator": "POSITIVE", "sort_order": 7},
+    {"field_name": "", "validator": "EXCHANGE_INSTRUMENT_MATCH", "sort_order": 8},
+    {"field_name": "", "validator": "DUPLICATE_CHECK", "sort_order": 9}
+  ]
+}
+```
+
+```json
+POST /api/v1/ingestion/rules/
+{
+  "name": "ticks-csv",
+  "data_type": "TICK_DATA",
+  "storage_prefix": "files",
+  "file_pattern": "synthetic_ticks_*.csv",
+  "chunk_size": 5000,
+  "parser_config": {"format": "csv"},
+  "instrument_mapping": {"instrument_identifier": "symbol"},
+  "exchange_mapping": {"exchange_identifier": "exchange"},
+  "validation_rule_set_id": "<tick-strict id>"
+}
+```
+
+If a rule was already created with `synthetic_market_*.csv`, narrow it. Only fields you send are changed:
+
+```json
+PATCH /api/v1/ingestion/rules/{rule_id}/
+{
+  "file_pattern": "synthetic_market_clean_*.csv"
+}
+```
+
 Drop files into `INGESTION_LOCAL_ROOT`, then:
 
 ```json
 POST /api/v1/ingestion/files/import/
-{ "storage_backends": ["local", "s3"] }
+{
+  "storage_backends": ["local", "s3"],
+  "storage_prefix": "files"
+}
 ```
+
+Omit the body to read local files, and S3 when `INGESTION_S3_BUCKET` is set. `POST /api/v1/ingestion/{ingestion_id}/retry/` has no body. `GET /api/v1/ingestion/logs/`, `GET /api/v1/ingestion/files/`, `GET /api/v1/ingestion/rules/`, `GET /api/v1/ingestion/`, `GET /api/v1/ingestion/{id}/` and `GET /api/v1/ingestion/{id}/rejections/` have no body. List calls accept `page` and `page_size`. Ingestion list filters are query parameters: `status`, `data_type`, `rule_id`, `filename`, `start_date`, `end_date`.
+
+### Uploading the same dates again
+
+A second import of a file whose trade ids or daily candles are already stored does not insert those rows again.
+
+Tick files from an earlier run are that case. Trade ids such as `ACME-2024-01-02-0000` and the rest of that series already exist, so those 2,000 rows are duplicates. `accepted_rows` stays 0, `duplicate_rows` is 2000, and the status stays `success`. The same is true for a clean daily file whose exchange, symbol, trading date, and OHLC values already match: matching candles are duplicates and the status stays `success`.
+
+`synthetic_market_dirty_*.csv` is not a second copy of the clean file. The generator corrupts rows on purpose, and a later import of the same dates also conflicts with candles already stored. `GET /api/v1/ingestion/{id}/rejections/` then returns rows like these (`id` and `rejected_at` change per run):
+
+```json
+[
+  {
+    "source_row_number": 2,
+    "reason_code": "PERSIST_MAPPING",
+    "field_name": "",
+    "error_message": "Unable to map OHLCV row."
+  },
+  {
+    "source_row_number": 1001,
+    "reason_code": "OHLC_RELATIONSHIP",
+    "field_name": "ohlc",
+    "error_message": "Invalid OHLC relationship."
+  },
+  {
+    "source_row_number": 2001,
+    "reason_code": "NON_NEGATIVE",
+    "field_name": "volume",
+    "error_message": "volume must be >= 0."
+  },
+  {
+    "source_row_number": 4001,
+    "reason_code": "PERSIST_MAPPING",
+    "field_name": "",
+    "error_message": "Unable to map OHLCV row."
+  },
+  {
+    "source_row_number": 5001,
+    "reason_code": "PERSIST_MAPPING",
+    "field_name": "",
+    "error_message": "Unable to map OHLCV row."
+  },
+  {
+    "source_row_number": 7001,
+    "reason_code": "OHLCV_CONFLICT",
+    "field_name": "trading_date",
+    "error_message": "Existing daily candle values conflict with the source row."
+  },
+  {
+    "source_row_number": 8001,
+    "reason_code": "OHLCV_CONFLICT",
+    "field_name": "trading_date",
+    "error_message": "Existing daily candle values conflict with the source row."
+  },
+  {
+    "source_row_number": 9001,
+    "reason_code": "OHLCV_CONFLICT",
+    "field_name": "trading_date",
+    "error_message": "Existing daily candle values conflict with the source row."
+  },
+  {
+    "source_row_number": 10001,
+    "reason_code": "EXCHANGE_INSTRUMENT_MATCH",
+    "field_name": "instrument_identifier",
+    "error_message": "Exchange and instrument combination was not found."
+  }
+]
+```
+
+On a 10,000-row dirty file those source rows are the injected faults, counted with the header line:
+
+| Source row | Injected fault | Why it is rejected |
+| --- | --- | --- |
+| 2 | `volume` removed | The candle cannot be stored. `PERSIST_MAPPING`. |
+| 1001 | `high` and `low` swapped | `OHLC_RELATIONSHIP`. |
+| 2001 | negative `volume` | `NON_NEGATIVE`. |
+| 4001 | `close` null | The candle cannot be stored. `PERSIST_MAPPING`. |
+| 5001 | `volume` set to `12k` | Not a number, so the candle cannot be stored. `PERSIST_MAPPING`. |
+| 7001 | `adjusted_close` blank | The date is already stored from the clean file with a different adjusted close. `OHLCV_CONFLICT`. The stored candle is kept. |
+| 8001 | `low` driven negative | Same date already stored with different prices. `OHLCV_CONFLICT`. |
+| 9001 | `date` shifted one day | That symbol and date already has a different candle. `OHLCV_CONFLICT`. |
+| 10001 | exchange set to `ZZZZ` | No such listing. `EXCHANGE_INSTRUMENT_MATCH`. |
+
+Other dirty rows (a broken timestamp, a malformed price, plus one exact duplicate and one conflicting duplicate appended after the last row) are rejected the same way. Retrying that ingestion does not repair them. Leave `synthetic_market_dirty_*.csv` in the drop folder by using the clean-file pattern above.
+
+To get new rows accepted, start the day after the last stored candle. `2027-11-02` is the next weekday after a candle stored on `2027-11-01`; use the next weekday after whatever date you actually have:
+
+```bash
+python scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 100 --seed 42 --start-date 2027-11-02
+```
+
+That command writes a new clean daily file and a new tick file. Import those. The earlier tick file, with `ACME-2024-01-02-0000` and the rest, stays a duplicate run.
 
 Administrative rules are configured in Django admin or the ORM. A rule stores
 its storage backend, relative location under `INGESTION_LOCAL_ROOT`, glob
@@ -508,14 +731,64 @@ seed-controlled names, timezones, asset classes and currencies, and leaves
 
 | Method | Endpoint                                                | Purpose                                                                                                     |
 | ------ | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/v1/exchanges/`                                  | List shared exchanges. Optional `code` filter.                                                            |
-| GET    | `/api/v1/instruments/`                                | List shared instruments. Filters: `exchange_code`, `symbol`, `asset_class`, `currency`, `search`. |
-| POST   | `/api/v1/instruments/`                                | Create one shared instrument on an existing exchange.                                                       |
+| GET    | `/api/v1/exchanges/`                                  | List shared exchanges. Optional `code` filter. No body.                                                   |
+| GET    | `/api/v1/instruments/`                                | List shared instruments. Filters: `exchange_code`, `symbol`, `asset_class`, `currency`, `search`. No body. |
+| POST   | `/api/v1/instruments/`                                | Create one shared instrument on an existing exchange. Body is the instrument example above.               |
 | GET    | `/api/v1/portfolios/by-name/?name=`                   | Retrieve one owned portfolio by its name.                                                                   |
 | POST   | `/api/v1/portfolios/by-name/instruments/bulk/`        | Bulk-attach instruments to an owned portfolio addressed by `name`.                                        |
 | POST   | `/api/v1/portfolios/{portfolio_id}/instruments/bulk/` | The same bulk attach, addressed by portfolio id.                                                            |
 
 The name match is case-insensitive and only searches portfolios you own. A missing name returns 404. If you have two portfolios with that same name, the response is 409 and you should use the existing id route. The bulk response includes both `name` and `portfolio_id`; each instrument line still uses `symbol` and `exchange`.
+
+`GET /api/v1/portfolios/by-name/?name=Core%20book` has no body. Bulk attach creates a missing listing when `create_if_missing` is true, then attaches it. One invalid line rolls the request back.
+
+```json
+POST /api/v1/portfolios/{portfolio_id}/instruments/bulk/
+{
+  "create_if_missing": true,
+  "instruments": [
+    {
+      "exchange_code": "XNAS",
+      "symbol": "ACME",
+      "name": "Acme Industrial",
+      "asset_class": "equity",
+      "currency": "USD",
+      "alias": "Core holding",
+      "is_active": true
+    },
+    {
+      "exchange_code": "XLON",
+      "symbol": "BETA",
+      "name": "Beta Markets",
+      "asset_class": "etf",
+      "currency": "EUR",
+      "alias": "",
+      "is_active": true
+    }
+  ]
+}
+```
+
+The by-name call uses the same `instruments` list and adds `name`:
+
+```json
+POST /api/v1/portfolios/by-name/instruments/bulk/
+{
+  "name": "Core book",
+  "create_if_missing": true,
+  "instruments": [
+    {
+      "exchange_code": "XNAS",
+      "symbol": "ACME",
+      "name": "Acme Industrial",
+      "asset_class": "equity",
+      "currency": "USD",
+      "alias": "Core holding",
+      "is_active": true
+    }
+  ]
+}
+```
 
 Portfolio creation and single-instrument attach remain the Feature 003
 endpoints. Bulk attachment is all-or-nothing: one invalid exchange, instrument
