@@ -43,6 +43,20 @@ _RESERVED_RECORD_ATTRIBUTES = {
     "request_id",
 }
 
+_UNCHANGED = object()
+
+
+def _safe_nested_value(key: str, value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(child_key): _safe_extra_value(str(child_key), child_value)
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_safe_extra_value(key, item) for item in value]
+    return _UNCHANGED
+
+
 _SENSITIVE_KEY_PARTS = (
     "password",
     "passwd",
@@ -61,13 +75,9 @@ def _safe_extra_value(key: str, value: Any) -> Any:
     normalized_key = key.lower().replace("-", "_")
     if any(part in normalized_key for part in _SENSITIVE_KEY_PARTS):
         return "[REDACTED]"
-    if isinstance(value, dict):
-        return {
-            str(child_key): _safe_extra_value(str(child_key), child_value)
-            for child_key, child_value in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_safe_extra_value(key, item) for item in value]
+    nested = _safe_nested_value(key, value)
+    if nested is not _UNCHANGED:
+        return nested
     return value
 
 

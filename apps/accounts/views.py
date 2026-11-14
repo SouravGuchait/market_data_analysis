@@ -88,11 +88,7 @@ class LoginView(APIView):
             )
             raise
         validated_data = cast(dict[str, Any], serializer.validated_data)
-        user = cast(
-            AbstractBaseUser,
-            validated_data["user"],
-            # pyrefly: ignore[not-a-type]
-        )
+        user = cast(AbstractBaseUser, validated_data["user"])
 
         refresh = RefreshToken.for_user(user)
         record_audit_event(
@@ -236,6 +232,55 @@ class PasswordResetRequestView(views.APIView):
         )
 
 
+def _password_reset_rejection(
+    token: object,
+    new_password: object,
+    password_confirm: object,
+) -> JsonResponse | None:
+    if not token or not new_password:
+        return JsonResponse(
+            {"success": False, "message": "Missing execution payload data parameters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if new_password != password_confirm:
+        return JsonResponse(
+            {"success": False, "message": "Password confirmations do not match."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return None
+
+
+def _password_policy_rejection(new_password: object) -> JsonResponse | None:
+    if not isinstance(new_password, str):
+        return JsonResponse(
+            {"success": False, "message": "Missing execution payload data parameters."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        validate_password(new_password)
+    except ValidationError as exc:
+        return JsonResponse(
+            {"success": False, "message": list(exc.messages)},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return None
+
+
+def _password_reset_record_rejection(
+    reset_record: PasswordResetToken | None,
+    new_password: object,
+) -> JsonResponse | None:
+    if reset_record is None or reset_record.is_expired:
+        return JsonResponse(
+            {
+                "success": False,
+                "message": "Invalid, consumed, or expired signature token mapping.",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    return _password_policy_rejection(new_password)
+
+
 class PasswordResetConfirmView(views.APIView):
     permission_classes = [AllowAny]
     throttle_classes = [ScopedRateThrottle]
@@ -245,39 +290,23 @@ class PasswordResetConfirmView(views.APIView):
         token = request.data.get("token")
         new_password = request.data.get("password")
         password_confirm = request.data.get("password_confirm")
-
-        if not token or not new_password:
-            return JsonResponse(
-                {"success": False, "message": "Missing execution payload data parameters."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if new_password != password_confirm:
-            return JsonResponse(
-                {"success": False, "message": "Password confirmations do not match."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        rejected = _password_reset_rejection(token, new_password, password_confirm)
+        if rejected is not None:
+            return rejected
 
         target_hash = PasswordResetToken.hash_token(token)
         reset_record = PasswordResetToken.objects.filter(
             token_hash=target_hash, is_used=False
         ).first()
 
-        if not reset_record or reset_record.is_expired:
-            return JsonResponse(
+        rejected = _password_reset_record_rejection(reset_record, new_password)
+        if reset_record is None or rejected is not None:
+            return rejected if rejected is not None else JsonResponse(
                 {
                     "success": False,
                     "message": "Invalid, consumed, or expired signature token mapping.",
                 },
                 status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Validate security profile criteria constraints on new password
-        try:
-            validate_password(new_password)
-        except ValidationError as e:
-            return JsonResponse(
-                {"success": False, "message": list(e.messages)}, status=status.HTTP_400_BAD_REQUEST
             )
 
         # Execute updates safely

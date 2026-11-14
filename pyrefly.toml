@@ -1,5 +1,0 @@
-# Use the project's development environment so third-party imports resolve.
-python-interpreter-path = ".venv/bin/python"
-
-project-includes = ["apps", "config", "manage.py"]
-project-excludes = [".venv", "**/migrations/**", "**/__pycache__/**"]

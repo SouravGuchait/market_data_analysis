@@ -11,9 +11,10 @@ name, and every row has a calendar `date` plus a timezone-aware `timestamp`
 (market close in the exchange's local timezone).
 
 Examples:
-    python scripts/generate_market_data.py --exponent 5 --seed 42
-    python scripts/generate_market_data.py --base 2 --exponent 16 --symbols 8
-    python scripts/generate_market_data.py --symbols 5 --days 100   # legacy
+    python3 scripts/generate_market_data.py --exponent 5 --seed 42
+    python3 scripts/generate_market_data.py --base 2 --exponent 16 --symbols 8
+    python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 --output-dir sample_data
+    python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 --seed 43 --output-dir sample_data
 """
 
 import secrets

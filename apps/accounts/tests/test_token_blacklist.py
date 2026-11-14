@@ -13,8 +13,8 @@ from rest_framework_simplejwt.serializers import TokenRefreshSerializer
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from apps.accounts.views import LogoutView, PasswordResetConfirmView
 from apps.accounts.models import PasswordResetToken
+from apps.accounts.views import LogoutView, PasswordResetConfirmView
 
 
 @pytest.fixture

@@ -152,6 +152,29 @@ python manage.py seed_exchanges
 python manage.py seed_instruments
 python manage.py seed_market_data
 ```
+### Feature 005: User file management and ingestion dispatch
+
+Authenticated users upload CSV, JSON, JSONL or XLSX files, create ingestion rules, scan
+one owned rule and dispatch each queued file as its own Celery task. Parsing and
+persistence remain later features.
+
+`INGESTION_LOCAL_ROOT` (Docker value `/data/ingestion`, mounted from `sample_data`) is the configured local directory. `INGESTION_S3_BUCKET` and `INGESTION_S3_PREFIX` are the configured S3 location. The client does not send a filesystem path or an S3 URI. `POST /api/v1/ingestion/files/import/` copies every supported file from those configured locations into `users/<user id>/<storage_prefix>/` in one request.
+
+| Call | Request | What it does |
+| --- | --- | --- |
+| `POST /api/v1/ingestion/files/import/` | JSON `{ "storage_backends": ["local", "s3"], "storage_prefix": "daily" }`. Omit `storage_backends` to use every configured location. | One request copies every `csv`, `json`, `jsonl` and `xlsx` file from `INGESTION_LOCAL_ROOT` and from the configured S3 prefix. Paths stay in the environment. Files already stored with the same content are skipped. |
+| `POST /api/v1/ingestion/rules/` | JSON rule body: name, data type, prefix, file pattern, parser config. | Creates a rule owned by the authenticated user. It does not upload or scan files. |
+| `POST /api/v1/ingestion/scan/` | JSON `{ "rule_id": "<rule name or uuid>" }`. | Looks for files already stored under that owned rule. `rule_id` accepts the rule name or its UUID. A file is queued only after its size and modification time stay unchanged for `required_stable_scans` (default `2`). This call does not dispatch Celery. |
+| `POST /api/v1/ingestion/dispatch/` | JSON `{}`, or `{ "ingestion_ids": ["<file name or uuid>", ...] }`. | Sends each eligible `QUEUED` ingestion to Celery after the database commit. Each entry is the uploaded file name or the ingestion UUID. The response returns `{ "name", "id" }` for each queued file. A repeat call does not dispatch the same record again. |
+| Celery Beat `scan_enabled_ingestion_rules` | No HTTP body. Schedule is `INGESTION_SCAN_INTERVAL_SECONDS`. | Scans administrative rules whose owner is null, and only when that rule's `scan_interval_seconds` has elapsed. It does not scan user-owned rules and does not upload files from the ingestion directory. |
+
+Administrative rules are configured in Django admin or the ORM. A rule stores
+its storage backend, relative location under `INGESTION_LOCAL_ROOT`, glob
+pattern, supported formats, scan interval, stability policy,
+schema/instrument/exchange mappings, and scan watermark/status. Local and EFS
+rules use the local filesystem adapter; the S3 choice is reserved and fails
+loudly until an adapter is added. New administrative rules default to
+`file_pattern="*"` and the supported formats `csv`, `json` and `xlsx`.
 
 Inside the Compose web container:
 
@@ -450,6 +473,18 @@ environment:
 - `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`
 - `LOG_FILE_PATH`
 - `INGESTION_LOCAL_ROOT`
+
+Optional ingestion settings:
+
+- `INGESTION_SCAN_INTERVAL_SECONDS` (default `60`) — Celery Beat discovery cadence for administrative rules.
+- `INGESTION_HASH_CHUNK_SIZE_BYTES` (default `1048576`) — content-hash read size.
+- `INGESTION_MAX_UPLOAD_BYTES` (default `52428800`) — maximum size of one uploaded file.
+- `INGESTION_MIN_CHUNK_SIZE` (default `1`) — minimum `chunk_size` accepted from the API.
+- `INGESTION_DEFAULT_CHUNK_SIZE` (default `5000`) — row batch size stored on a new user rule when the request omits `chunk_size`.
+- `INGESTION_MAX_CHUNK_SIZE` (default `100000`) — maximum `chunk_size` accepted from the API.
+- `INGESTION_IMPORT_MAX_FILES` (default `500`) — maximum number of files one configured import copies.
+- `INGESTION_S3_BUCKET`, `INGESTION_S3_PREFIX`, `INGESTION_S3_REGION` — S3 location read by the import call. Leave the bucket empty when S3 is not used.
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` — credentials read by the AWS SDK. These are not API fields.
 
 Production additionally requires `DJANGO_SETTINGS_MODULE=config.settings.production`
 and rejects the development secret key and an empty host list.

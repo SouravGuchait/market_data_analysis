@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
@@ -26,24 +27,24 @@ def list_visible_audit_events(user: Any) -> QuerySet[AuditEvent]:
 
 def filter_audit_events(
     queryset: QuerySet[AuditEvent],
-    *,
-    action: str = "",
-    resource_type: str = "",    
-    status: str = "",
-    start_date: datetime  = datetime.now(),
-    end_date: datetime | None = None,
+    filters: Mapping[str, object],
 ) -> QuerySet[AuditEvent]:
     """Apply validated filter values to an already scoped queryset."""
 
-    if action:
+    action = filters.get("action")
+    resource_type = filters.get("resource_type")
+    status = filters.get("status")
+    start_date = filters.get("start_date")
+    end_date = filters.get("end_date")
+    if isinstance(action, str) and action:
         queryset = queryset.filter(action=action)
-    if resource_type:
+    if isinstance(resource_type, str) and resource_type:
         queryset = queryset.filter(resource_type=resource_type)
-    if status:
+    if isinstance(status, str) and status:
         queryset = queryset.filter(status=status)
-    if start_date is not None:
+    if isinstance(start_date, datetime):
         queryset = queryset.filter(created_at__gte=start_date)
-    if end_date is not None:
+    if isinstance(end_date, datetime):
         queryset = queryset.filter(created_at__lte=end_date)
     return queryset
 
