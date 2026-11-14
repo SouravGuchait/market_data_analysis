@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from collections.abc import Iterable
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.base import ModelBase
 
 
 class AuditAction(models.TextChoices):
@@ -106,10 +107,24 @@ class AuditEvent(models.Model):
     def __str__(self) -> str:
         return f"{self.action} {self.resource_type}:{self.resource_id}".strip()
 
-    def save(self, *args: Any, **kwargs: Any) -> None:
+    def save(
+        self,
+        *,
+        force_insert: bool | tuple[ModelBase, ...] = False,
+        force_update: bool = False,
+        using: str | None = None,
+        update_fields: Iterable[str] | None = None,
+    ) -> None:
         if not self._state.adding:
             raise ValidationError("Audit events are append-only and cannot be updated.")
-        super().save(*args, **kwargs)
+        super().save(
+            force_insert=force_insert,
+            force_update=force_update,
+            using=using,
+            update_fields=update_fields,
+        )
 
-    def delete(self, *args: Any, **kwargs: Any) -> tuple[int, dict[str, int]]:
+    def delete(
+        self, using: str | None = None, keep_parents: bool = False
+    ) -> tuple[int, dict[str, int]]:
         raise ValidationError("Audit events cannot be deleted through application code.")

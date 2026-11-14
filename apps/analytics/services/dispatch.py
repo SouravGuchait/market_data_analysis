@@ -6,9 +6,9 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
 from uuid import UUID
 
+from django.contrib.auth.base_user import AbstractBaseUser
 from django.db import transaction
 from django.utils import timezone
 
@@ -31,11 +31,11 @@ class AggregationRequest:
     instrument_ids: Sequence[int]
     exchange_ids: Sequence[int]
     timeframes: Sequence[str] | None = None
-    requested_by: Any | None = None
+    requested_by: AbstractBaseUser | None = None
     ingestion_id: UUID | None = None
 
 
-def _audit_triggered(run: AggregationRun, *, actor: Any | None) -> None:
+def _audit_triggered(run: AggregationRun, *, actor: AbstractBaseUser | None) -> None:
     metadata = {
         "trigger": run.trigger,
         "range_start": run.range_start.isoformat(),

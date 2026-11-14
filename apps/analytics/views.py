@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
-from typing import Any
+from datetime import date, datetime
 from uuid import UUID
 
-from django.db.models import QuerySet
+from django.contrib.auth.base_user import AbstractBaseUser
+from django.db.models import Model, QuerySet
 from django.http import JsonResponse
-from rest_framework import status
+from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
@@ -36,15 +36,21 @@ from apps.exchanges.models import Exchange
 from apps.instruments.models import Instrument
 
 
-def _mapping(value: object) -> dict[str, Any]:
+def _mapping(value: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         return {}
     return {str(key): item for key, item in value.items()}
 
 
+def _user(request: Request) -> AbstractBaseUser:
+    if isinstance(request.user, AbstractBaseUser):
+        return request.user
+    raise PermissionError("Authentication required.")
+
+
 def success(
     message: str,
-    data: Any = None,
+    data: object = None,
     status_code: int = status.HTTP_200_OK,
 ) -> Response:
     return Response(
@@ -53,11 +59,11 @@ def success(
     )
 
 
-def _paginated(
+def _paginated[M: Model](
     view: APIView,
     request: Request,
-    queryset: QuerySet[Any],
-    serializer_class: type,
+    queryset: QuerySet[M],
+    serializer_class: type[serializers.BaseSerializer[Model]],
     message: str,
 ) -> Response:
     paginator = StandardResultsPagination()
@@ -75,15 +81,18 @@ class CandleListView(APIView):
         if not filters.is_valid():
             return failure("Invalid candle filters", filters.errors)
         data = _mapping(filters.validated_data)
-        instrument_ids, exchange_ids, error = resolve_scope(request.user, data)
+        instrument_ids, exchange_ids, error = resolve_scope(_user(request), data)
         if error is not None:
             return error
+        timeframe = data.get("timeframe")
+        range_start = data.get("start")
+        range_end = data.get("end")
         queryset = list_candles(
             instrument_ids=instrument_ids,
             exchange_ids=exchange_ids,
-            timeframe=data.get("timeframe") if isinstance(data.get("timeframe"), str) else None,
-            range_start=data.get("start") if isinstance(data.get("start"), datetime) else None,
-            range_end=data.get("end") if isinstance(data.get("end"), datetime) else None,
+            timeframe=timeframe if isinstance(timeframe, str) else None,
+            range_start=range_start if isinstance(range_start, datetime) else None,
+            range_end=range_end if isinstance(range_end, datetime) else None,
         )
         return _paginated(self, request, queryset, CandleReadSerializer, "Candles retrieved")
 
@@ -92,8 +101,8 @@ def _returns_json(
     *,
     success_flag: bool,
     message: str,
-    data: Any = None,
-    errors: Any = None,
+    data: object = None,
+    errors: object = None,
     status_code: int = status.HTTP_200_OK,
 ) -> JsonResponse:
     return JsonResponse(
@@ -107,14 +116,12 @@ def _returns_json(
     )
 
 
-def _optional_date(value: object):
-    from datetime import date
-
+def _optional_date(value: object) -> date | None:
     return value if isinstance(value, date) else None
 
 
-def _returns_from_scope(request: Request, data: dict[str, Any]) -> JsonResponse:
-    instrument_ids, _exchange_ids, error = resolve_scope(request.user, data)
+def _returns_from_scope(request: Request, data: dict[str, object]) -> JsonResponse:
+    instrument_ids, _exchange_ids, error = resolve_scope(_user(request), data)
     if error is not None:
         payload = error.data if isinstance(error.data, dict) else {}
         return _returns_json(
@@ -172,7 +179,7 @@ def _resolve_exchange(exchange_id: int | None, exchange_code: str | None) -> Exc
     return Exchange.objects.filter(pk=ids[0]).first()
 
 
-def _resolve_manual_instrument(data: dict[str, Any], exchange: Exchange) -> Instrument | None:
+def _resolve_manual_instrument(data: dict[str, object], exchange: Exchange) -> Instrument | None:
     from apps.analytics.selectors import resolve_instrument_ids_by_keys
 
     instrument_id = _as_optional_int(data.get("instrument_id"))
@@ -210,7 +217,7 @@ def _manual_lookup_error(
 
 
 def _validate_manual_targets(
-    data: dict[str, Any],
+    data: dict[str, object],
 ) -> tuple[Instrument, Exchange, datetime, datetime] | Response:
     exchange = _resolve_exchange(
         _as_optional_int(data.get("exchange_id")),
@@ -232,7 +239,16 @@ def _validate_manual_targets(
     return instrument, exchange, range_start, range_end
 
 
-def _create_manual_run(request: Request, data: dict[str, Any]) -> Response:
+def _string_list(value: object) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    names = [item for item in value if isinstance(item, str)]
+    if len(names) != len(value):
+        return None
+    return names
+
+
+def _create_manual_run(request: Request, data: dict[str, object]) -> Response:
     validated = _validate_manual_targets(data)
     if isinstance(validated, Response):
         return validated
@@ -244,8 +260,8 @@ def _create_manual_run(request: Request, data: dict[str, Any]) -> Response:
             range_end=range_end,
             instrument_ids=[instrument.pk],
             exchange_ids=[exchange.pk],
-            timeframes=data.get("timeframes"),
-            requested_by=request.user,
+            timeframes=_string_list(data.get("timeframes")),
+            requested_by=_user(request),
         )
     )
     schedule_run_on_commit(run.pk)

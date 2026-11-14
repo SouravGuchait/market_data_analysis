@@ -5,14 +5,15 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any
 
+from django.contrib.auth.base_user import AbstractBaseUser
+from django.contrib.auth.models import AbstractUser
 from django.db.models import QuerySet
 
 from .models import AuditEvent
 
 
-def list_visible_audit_events(user: Any) -> QuerySet[AuditEvent]:
+def list_visible_audit_events(user: AbstractBaseUser) -> QuerySet[AuditEvent]:
     """Return records the authenticated user may inspect.
 
     Ordinary users see only events attributed to them. Staff users are the
@@ -20,17 +21,19 @@ def list_visible_audit_events(user: Any) -> QuerySet[AuditEvent]:
     """
 
     queryset = AuditEvent.objects.select_related("actor")
-    if not user.is_staff:
+    if not isinstance(user, AbstractUser) or not user.is_staff:
         queryset = queryset.filter(actor=user)
     return queryset.order_by("-created_at", "-id")
 
 
 def filter_audit_events(
     queryset: QuerySet[AuditEvent],
-    filters: Mapping[str, object],
+    filters: object,
 ) -> QuerySet[AuditEvent]:
     """Apply validated filter values to an already scoped queryset."""
 
+    if not isinstance(filters, Mapping):
+        return queryset
     action = filters.get("action")
     resource_type = filters.get("resource_type")
     status = filters.get("status")
@@ -49,7 +52,7 @@ def filter_audit_events(
     return queryset
 
 
-def get_visible_audit_event(user: Any, audit_id: uuid.UUID) -> AuditEvent | None:
+def get_visible_audit_event(user: AbstractBaseUser, audit_id: uuid.UUID) -> AuditEvent | None:
     """Fetch one visible record, or ``None`` for missing and foreign records."""
 
     return list_visible_audit_events(user).filter(pk=audit_id).first()

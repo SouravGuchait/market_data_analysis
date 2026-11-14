@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from django.contrib.auth.base_user import AbstractBaseUser
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -75,7 +76,9 @@ def _identity_conflict(filters: dict[str, object]) -> Response | None:
     return None
 
 
-def _portfolio_ids(user: object, filters: dict[str, object]) -> list[int] | None | Response:
+def _portfolio_ids(
+    user: AbstractBaseUser, filters: dict[str, object]
+) -> list[int] | None | Response:
     portfolio_id = _as_uuid(filters.get("portfolio_id"))
     if portfolio_id is None:
         return None
@@ -109,7 +112,7 @@ def _named_instrument_ids(
 
 
 def _scope_parts(
-    user: object,
+    user: AbstractBaseUser,
     filters: dict[str, object],
 ) -> tuple[list[int] | None, list[int] | None, Response | None]:
     portfolio_ids = _portfolio_ids(user, filters)
@@ -137,7 +140,7 @@ def _scope_parts(
 
 
 def resolve_scope(
-    user: object,
+    user: AbstractBaseUser,
     filters: dict[str, object],
 ) -> tuple[list[int] | None, list[int] | None, Response | None]:
     conflict = _identity_conflict(filters)

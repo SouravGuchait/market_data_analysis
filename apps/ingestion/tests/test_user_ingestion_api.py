@@ -492,7 +492,11 @@ def test_import_copies_every_configured_local_file(
     names = sorted(names)
     assert names == ["synthetic_market_clean.csv", "synthetic_market_clean.json"]
     copied = (
-        Path(settings.INGESTION_SYSTEM_ROOT) / "users" / str(user.pk) / "files" / "synthetic_market_clean.csv"
+        Path(settings.INGESTION_SYSTEM_ROOT)
+        / "users"
+        / str(user.pk)
+        / "files"
+        / "synthetic_market_clean.csv"
     )
     assert copied.is_file()
 
@@ -580,15 +584,20 @@ def test_import_queues_a_matching_rule_and_removes_the_upload(
         )
     )
     assert response.status_code == 201
-    stored_path = Path(settings.INGESTION_SYSTEM_ROOT) / "users" / str(user.pk) / "files" / "alpha.csv"
+    stored_path = (
+        Path(settings.INGESTION_SYSTEM_ROOT) / "users" / str(user.pk) / "files" / "alpha.csv"
+    )
     assert stored_path.is_file()
     assert not (ingestion_root / "alpha.csv").exists()
     queued = _data_dict(response)["queued"]
     assert isinstance(queued, list)
     assert len(queued) == 1
-    assert Ingestion.objects.filter(
-        owner=user, file_name="alpha.csv", state=IngestionState.QUEUED
-    ).count() == 1
+    assert (
+        Ingestion.objects.filter(
+            owner=user, file_name="alpha.csv", state=IngestionState.QUEUED
+        ).count()
+        == 1
+    )
     _import_files(auth_client, ingestion_root, _csv("alpha.csv", payload))
     assert Ingestion.objects.filter(owner=user, file_name="alpha.csv").count() == 1
 

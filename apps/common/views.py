@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from django.conf import settings
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
@@ -21,15 +19,16 @@ def _response_payload(
     *,
     success: bool,
     message: str,
-    data: dict[str, Any],
+    data: dict[str, object],
     errors: dict[str, list[str]] | None,
-) -> dict[str, Any]:
-    return {
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "success": success,
         "message": message,
         "data": data,
         "errors": errors,
     }
+    return payload
 
 
 class HealthLivenessView(APIView):
@@ -43,7 +42,7 @@ class HealthLivenessView(APIView):
         tags=["health"],
     )
     def get(self, request: Request) -> Response:
-        data = {
+        data: dict[str, object] = {
             "status": "ok",
             "version": settings.APP_VERSION,
             "timestamp": timezone.now(),
@@ -74,8 +73,10 @@ class HealthReadinessView(APIView):
     )
     def get(self, request: Request) -> Response:
         result = run_readiness_checks()
-        checks = {name: {"status": check.status} for name, check in result.checks.items()}
-        data = {
+        checks: dict[str, object] = {
+            name: {"status": check.status} for name, check in result.checks.items()
+        }
+        data: dict[str, object] = {
             "status": "ok" if result.is_ready else "degraded",
             "version": settings.APP_VERSION,
             "timestamp": timezone.now(),

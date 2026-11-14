@@ -9,9 +9,9 @@ ingestion.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -35,24 +35,32 @@ class StabilityPolicy:
     overlap_seconds: int = 0
 
 
-def _non_negative_int(policy: dict[str, Any], key: str, default: int) -> int:
+def _non_negative_int(policy: Mapping[str, object], key: str, default: int) -> int:
     raw = policy.get(key, default)
-    try:
-        value = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise IngestionConfigurationError(
-            f"Stability policy field {key!r} must be an integer."
-        ) from exc
+    if isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str):
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise IngestionConfigurationError(
+                f"Stability policy field {key!r} must be an integer."
+            ) from exc
+    else:
+        raise IngestionConfigurationError(f"Stability policy field {key!r} must be an integer.")
     if value < 0:
         raise IngestionConfigurationError(f"Stability policy field {key!r} cannot be negative.")
     return value
 
 
-def resolve_stability_policy(raw: dict[str, Any] | None) -> StabilityPolicy:
+def resolve_stability_policy(raw: object) -> StabilityPolicy:
     """Return a validated policy, raising for an unusable configuration."""
 
-    policy = raw or {}
-    if not isinstance(policy, dict):
+    if raw is None:
+        policy: dict[str, object] = {}
+    elif isinstance(raw, dict):
+        policy = {str(key): value for key, value in raw.items()}
+    else:
         raise IngestionConfigurationError("Stability policy must be a JSON object.")
 
     required_scans = _non_negative_int(
@@ -78,7 +86,7 @@ def default_stability_policy() -> dict[str, int]:
     return {"required_stable_scans": DEFAULT_REQUIRED_STABLE_SCANS}
 
 
-def default_mapping() -> dict[str, Any]:
+def default_mapping() -> dict[str, object]:
     return {}
 
 

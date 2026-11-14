@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import pytest
-from django.contrib.auth import get_user_model
 from django.contrib.auth.models import User
 from rest_framework.test import APIRequestFactory, force_authenticate
 from rest_framework_simplejwt.exceptions import TokenError
@@ -18,9 +15,8 @@ from apps.accounts.views import LogoutView, PasswordResetConfirmView
 
 
 @pytest.fixture
-def account_user(db):
-    user_model = cast(type[User], get_user_model())
-    return user_model.objects.create_user(
+def account_user(db) -> User:
+    return User.objects.create_user(
         username="blacklist-user",
         email="blacklist@example.com",
         password="Original!Password-8214",
@@ -43,7 +39,7 @@ def test_logout_persists_refresh_token_in_blacklist(account_user):
     assert response.status_code == 205
     assert BlacklistedToken.objects.filter(token__jti=token_id).exists()
     with pytest.raises(TokenError):
-        RefreshToken(cast(RefreshToken, str(refresh)))
+        TokenRefreshSerializer(data={"refresh": str(refresh)}).is_valid(raise_exception=True)
 
 
 @pytest.mark.django_db
@@ -84,4 +80,4 @@ def test_password_reset_persists_blacklist_for_all_user_refresh_tokens(account_u
     assert response.status_code == 200
     assert BlacklistedToken.objects.filter(token__jti=token_id).exists()
     with pytest.raises(TokenError):
-        RefreshToken(cast(RefreshToken, str(refresh)))
+        TokenRefreshSerializer(data={"refresh": str(refresh)}).is_valid(raise_exception=True)

@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Hashable, Mapping, Sequence
 
 import pandas as pd
 from django.conf import settings
@@ -35,7 +34,7 @@ def _cell_value(value: object) -> object:
     return str(value)
 
 
-def _row_mapping(frame: pd.DataFrame, index: Any) -> dict[str, object]:
+def _row_mapping(frame: pd.DataFrame, index: Hashable) -> dict[str, object]:
     payload: dict[str, object] = {}
     for column in frame.columns:
         if column == SOURCE_ROW_COLUMN:

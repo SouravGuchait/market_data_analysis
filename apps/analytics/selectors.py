@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date, datetime
-from typing import Any
 from uuid import UUID
 
+from django.contrib.auth.models import AbstractBaseUser
 from django.db.models import QuerySet
 
 from apps.analytics.models import AggregationRun
@@ -41,7 +41,7 @@ def list_candles(
     return queryset.order_by("bucket_start", "id")
 
 
-def owned_portfolio_instrument_ids(user: Any, portfolio_id: UUID) -> list[int] | None:
+def owned_portfolio_instrument_ids(user: AbstractBaseUser, portfolio_id: UUID) -> list[int] | None:
     """Return instrument ids for an owned portfolio, or None when not found."""
 
     portfolio = get_user_portfolio(user, portfolio_id)

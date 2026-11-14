@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import secrets
-from typing import Any, cast
+from collections.abc import Mapping
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -45,7 +45,10 @@ class RegisterView(APIView):
         serializer = self.serializer_class(data=request.data)
         serializer.is_valid(raise_exception=True)
         with transaction.atomic():
-            user = cast(User, serializer.save())
+            saved = serializer.save()
+            if not isinstance(saved, User):
+                raise TypeError("Registration did not create a user.")
+            user = saved
             record_audit_event(
                 actor=user,
                 action=AuditAction.REGISTRATION,
@@ -87,8 +90,11 @@ class LoginView(APIView):
                 metadata={"reason": "authentication_failed"},
             )
             raise
-        validated_data = cast(dict[str, Any], serializer.validated_data)
-        user = cast(AbstractBaseUser, validated_data["user"])
+        validated_data = serializer.validated_data
+        candidate = validated_data.get("user") if isinstance(validated_data, Mapping) else None
+        if not isinstance(candidate, AbstractBaseUser):
+            raise DRFValidationError("Invalid username/email or password configuration.")
+        user = candidate
 
         refresh = RefreshToken.for_user(user)
         record_audit_event(

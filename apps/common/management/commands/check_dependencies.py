@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.common.health import run_readiness_checks
@@ -13,7 +11,7 @@ from config.celery import app as celery_app
 class Command(BaseCommand):
     help = "Check MySQL, Redis cache and Celery broker connectivity."
 
-    def handle(self, *args: Any, **options: Any) -> None:
+    def handle(self, *args: object, **options: object) -> None:
         failures: list[str] = []
 
         for name, result in run_readiness_checks().checks.items():

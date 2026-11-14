@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import cast
 from urllib.parse import parse_qs, urlparse
 
 import pytest
-from django.contrib.auth import get_user_model
 from django.contrib.auth.models import User
 from django.core import mail
 from django.test import override_settings
@@ -29,10 +27,9 @@ def api_client() -> APIClient:
 
 
 @pytest.fixture
-def account_user(db):
-    """Create a user using whichever user model Django is configured to use."""
-    user_model = cast(type[User], get_user_model())
-    return user_model.objects.create_user(
+def account_user(db) -> User:
+    """Create a user using the configured Django user model."""
+    return User.objects.create_user(
         username="alice",
         email="alice@example.com",
         password=STRONG_PASSWORD,
@@ -65,7 +62,7 @@ def test_register_happy_path_creates_user_with_hashed_password(api_client):
         "username": "new-user",
         "email": "new@example.com",
     }
-    created_user = cast(User, get_user_model().objects.get(username="new-user"))
+    created_user = User.objects.get(username="new-user")
     assert created_user.email == "new@example.com"
     assert created_user.check_password(STRONG_PASSWORD)
     assert created_user.password != STRONG_PASSWORD
@@ -117,7 +114,7 @@ def test_register_rejects_invalid_input_without_creating_user(
     )
 
     assert response.status_code == 400
-    assert get_user_model().objects.count() == 0
+    assert User.objects.count() == 0
     assert error_field in response.json()
 
 
@@ -135,7 +132,7 @@ def test_register_rejects_existing_username(api_client, account_user):
     )
 
     assert response.status_code == 400
-    assert get_user_model().objects.count() == 1
+    assert User.objects.count() == 1
 
 
 @pytest.mark.django_db
@@ -152,7 +149,7 @@ def test_register_rejects_existing_email(api_client, account_user):
     )
 
     assert response.status_code == 400
-    assert get_user_model().objects.count() == 1
+    assert User.objects.count() == 1
 
 
 @pytest.mark.django_db

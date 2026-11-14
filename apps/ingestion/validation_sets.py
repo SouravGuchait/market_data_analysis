@@ -29,7 +29,9 @@ def _create_rules(rule_set: ValidationRuleSet, rules: object) -> None:
         raise _request_error("rules", "Rules must be a list.")
     for index, row in enumerate(rules):
         if not isinstance(row, Mapping):
-            raise IngestionRequestError("Validation failed", {"rules": ["Each rule must be an object."]})
+            raise IngestionRequestError(
+                "Validation failed", {"rules": ["Each rule must be an object."]}
+            )
         _create_rule(rule_set, row, index)
 
 

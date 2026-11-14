@@ -10,7 +10,7 @@ from django.db import IntegrityError, transaction
 from apps.exchanges.models import Exchange
 from apps.instruments.models import Instrument
 from apps.market_data.models import DailyOHLCV
-from apps.market_data.services import DataMappingError, MarketDataMappingService
+from apps.market_data.services import DataMappingError, map_and_persist_row
 from apps.portfolios.models import Portfolio, PortfolioInstrument
 
 
@@ -110,12 +110,10 @@ def test_mapping_creates_instrument_and_daily_candle(exchange):
         "adjusted_close": "",
         "volume": "5",
     }
-    candle, result = MarketDataMappingService.map_and_persist_row(
-        row, allow_instrument_creation=True
-    )
+    candle, result = map_and_persist_row(row, allow_instrument_creation=True)
     assert result == "inserted"
     assert candle.instrument.exchange == exchange
-    duplicate, result = MarketDataMappingService.map_and_persist_row(row)
+    duplicate, result = map_and_persist_row(row)
     assert duplicate.pk == candle.pk
     assert result == "skipped_duplicate"
 
@@ -137,7 +135,7 @@ def test_mapping_rejects_invalid_ohlc(exchange):
         "volume": "5",
     }
     with pytest.raises(DataMappingError):
-        MarketDataMappingService.map_and_persist_row(row)
+        map_and_persist_row(row)
 
 
 @pytest.mark.django_db
@@ -149,7 +147,7 @@ def test_mapping_rejects_unknown_exchange_and_missing_instrument_policy(exchange
         "timestamp": "2024-01-02T21:00:00+00:00",
     }
     with pytest.raises(DataMappingError, match="Unknown or inactive exchange"):
-        MarketDataMappingService.map_and_persist_row(row)
+        map_and_persist_row(row)
     row["exchange"] = exchange.code
     with pytest.raises(DataMappingError, match="not registered"):
-        MarketDataMappingService.map_and_persist_row(row, allow_instrument_creation=False)
+        map_and_persist_row(row, allow_instrument_creation=False)

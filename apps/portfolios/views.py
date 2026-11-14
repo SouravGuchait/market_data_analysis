@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from typing import Any, cast
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.db import IntegrityError, transaction
@@ -56,7 +55,7 @@ from apps.portfolios.services import (
 
 def success(
     message: str,
-    data: Any = None,
+    data: object = None,
     status_code: int = status.HTTP_200_OK,
 ) -> Response:
     return Response(
@@ -67,13 +66,19 @@ def success(
 
 def failure(
     message: str,
-    errors: Any,
+    errors: object,
     status_code: int = status.HTTP_400_BAD_REQUEST,
 ) -> Response:
     return Response(
         {"success": False, "message": message, "data": None, "errors": errors},
         status=status_code,
     )
+
+
+def _mapping(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in value.items()}
 
 
 def portfolio_not_found() -> Response:
@@ -103,9 +108,10 @@ class PortfolioListCreateView(PortfolioAPIView):
         if not serializer.is_valid():
             return failure("Validation failed", serializer.errors)
 
-        validated_data = cast(dict[str, Any], serializer.validated_data)
         with transaction.atomic():
-            portfolio = create_portfolio(owner=request.user, data=validated_data)
+            portfolio = create_portfolio(
+                owner=request.user, data=_mapping(serializer.validated_data)
+            )
             record_audit_event(
                 actor=request.user,
                 action=AuditAction.PORTFOLIO_CREATED,
@@ -138,7 +144,7 @@ class PortfolioDetailView(PortfolioAPIView):
         if not serializer.is_valid():
             return failure("Validation failed", serializer.errors)
 
-        validated_data = cast(dict[str, Any], serializer.validated_data)
+        validated_data = _mapping(serializer.validated_data)
         changed_fields = sorted(validated_data)
         with transaction.atomic():
             portfolio = update_portfolio(portfolio, validated_data)

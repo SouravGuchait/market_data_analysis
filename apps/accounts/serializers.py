@@ -3,7 +3,6 @@ from __future__ import annotations
 from django.contrib.auth.models import User
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
-from django_zxcvbn_password_validator import ZxcvbnPasswordValidator
 from rest_framework import serializers
 
 
@@ -40,13 +39,6 @@ class RegisterSerializer(serializers.Serializer):
             validate_password(attrs["password"])
         except ValidationError as e:
             raise serializers.ValidationError({"password": list(e.messages)}) from e
-        validator = ZxcvbnPasswordValidator()
-        # Custom Zxcvbn strength rating check (0-4 scale)
-        try:
-            validator.validate(attrs["password"])
-            print("Password is strong enough!")
-        except ValidationError as e:
-            print(f"Password rejected: {e.messages}")
         return attrs
 
     def create(self, validated_data):

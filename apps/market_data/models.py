@@ -182,9 +182,7 @@ class Candle(models.Model):
     API field ``timestamp`` maps to ``bucket_start`` and is not stored separately.
     """
 
-    instrument = models.ForeignKey(
-        Instrument, on_delete=models.CASCADE, related_name="candles"
-    )
+    instrument = models.ForeignKey(Instrument, on_delete=models.CASCADE, related_name="candles")
     exchange = models.ForeignKey(Exchange, on_delete=models.PROTECT, related_name="candles")
     timeframe = models.CharField(max_length=8, choices=CandleTimeframe.choices)
     bucket_start = models.DateTimeField()

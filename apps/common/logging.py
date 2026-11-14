@@ -12,7 +12,6 @@ import logging
 from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 _REQUEST_ID: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -46,12 +45,12 @@ _RESERVED_RECORD_ATTRIBUTES = {
 _UNCHANGED = object()
 
 
-def _safe_nested_value(key: str, value: Any) -> Any:
+def _safe_nested_value(key: str, value: object) -> object:
     if isinstance(value, dict):
-        return {
-            str(child_key): _safe_extra_value(str(child_key), child_value)
-            for child_key, child_value in value.items()
-        }
+        nested: dict[str, object] = {}
+        for child_key, child_value in value.items():
+            nested[str(child_key)] = _safe_extra_value(str(child_key), child_value)
+        return nested
     if isinstance(value, list | tuple):
         return [_safe_extra_value(key, item) for item in value]
     return _UNCHANGED
@@ -69,7 +68,7 @@ _SENSITIVE_KEY_PARTS = (
 )
 
 
-def _safe_extra_value(key: str, value: Any) -> Any:
+def _safe_extra_value(key: str, value: object) -> object:
     """Redact sensitive structured fields, including nested mappings."""
 
     normalized_key = key.lower().replace("-", "_")
@@ -112,12 +111,15 @@ class StructuredFormatter(logging.Formatter):
     """Render a log record as a single structured JSON object."""
 
     def format(self, record: logging.LogRecord) -> str:
-        payload: dict[str, Any] = {
+        raw_request_id = getattr(record, "request_id", None)
+        if not isinstance(raw_request_id, str) or not raw_request_id:
+            raw_request_id = get_request_id()
+        payload: dict[str, object] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
-            "request_id": getattr(record, "request_id", get_request_id()),
+            "request_id": raw_request_id,
             "module": record.module,
             "process": record.process,
             "thread": record.thread,

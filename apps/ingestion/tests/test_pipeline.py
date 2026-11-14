@@ -153,7 +153,9 @@ def test_delete_staging_never_removes_source(rule, inbox: Path, write_file) -> N
     assert not staging.exists()
 
 
-def _system_ingestion(rule, owner: User, settings, *, accepted: int, rejected: int) -> tuple[Ingestion, Path]:
+def _system_ingestion(
+    rule, owner: User, settings, *, accepted: int, rejected: int
+) -> tuple[Ingestion, Path]:
     key = f"users/{owner.pk}/files/ticks.csv"
     path = Path(settings.INGESTION_SYSTEM_ROOT) / key
     path.parent.mkdir(parents=True, exist_ok=True)

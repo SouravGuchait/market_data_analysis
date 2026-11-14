@@ -6,7 +6,6 @@ import logging
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import IntegrityError, transaction
@@ -23,7 +22,7 @@ class DataMappingError(ValueError):
     """A source row cannot be mapped to the market-data schema."""
 
 
-def _decimal(value: Any, field: str, *, optional: bool = False) -> Decimal | None:
+def _decimal(value: object, field: str, *, optional: bool = False) -> Decimal | None:
     if optional and value in (None, ""):
         return None
     if value in (None, "") or isinstance(value, bool):
@@ -37,7 +36,7 @@ def _decimal(value: Any, field: str, *, optional: bool = False) -> Decimal | Non
     return result
 
 
-def _integer(value: Any, field: str) -> int:
+def _integer(value: object, field: str) -> int:
     if value in (None, "") or isinstance(value, bool):
         raise DataMappingError(f"{field} is required.")
     try:
@@ -51,7 +50,7 @@ def _integer(value: Any, field: str) -> int:
     return result
 
 
-def _row_text(row: Mapping[str, Any], field: str) -> str:
+def _row_text(row: Mapping[str, object], field: str) -> str:
     value = row.get(field)
     if not isinstance(value, str) or not value.strip():
         raise DataMappingError(f"{field} is required.")
@@ -79,7 +78,7 @@ def _parsed_timestamp(raw: object) -> datetime | None:
     return parse_datetime(str(raw))
 
 
-def _session_date(row: Mapping[str, Any], exchange: Exchange) -> tuple[date, datetime]:
+def _session_date(row: Mapping[str, object], exchange: Exchange) -> tuple[date, datetime]:
     trading_date = _parsed_date(row.get("date"))
     timestamp = _parsed_timestamp(row.get("timestamp"))
     if trading_date is None or timestamp is None or timestamp.utcoffset() is None:
@@ -94,7 +93,7 @@ def _session_date(row: Mapping[str, Any], exchange: Exchange) -> tuple[date, dat
     return trading_date, timestamp
 
 
-def _reject_metadata_conflict(instrument: Instrument, row: Mapping[str, Any]) -> None:
+def _reject_metadata_conflict(instrument: Instrument, row: Mapping[str, object]) -> None:
     incoming = (row.get("name"), row.get("asset_class"), row.get("currency"))
     expected = (instrument.name, instrument.asset_class, instrument.currency)
     if any(value is not None for value in incoming) and incoming != expected:
@@ -102,7 +101,7 @@ def _reject_metadata_conflict(instrument: Instrument, row: Mapping[str, Any]) ->
 
 
 def _create_listed_instrument(
-    exchange: Exchange, symbol: str, row: Mapping[str, Any], *, allow_instrument_creation: bool
+    exchange: Exchange, symbol: str, row: Mapping[str, object], *, allow_instrument_creation: bool
 ) -> Instrument:
     if not allow_instrument_creation:
         raise DataMappingError(f"Instrument {symbol} is not registered.")
@@ -125,7 +124,7 @@ def _create_listed_instrument(
 
 
 def _instrument_for_row(
-    exchange: Exchange, symbol: str, row: Mapping[str, Any], *, allow_instrument_creation: bool
+    exchange: Exchange, symbol: str, row: Mapping[str, object], *, allow_instrument_creation: bool
 ) -> Instrument:
     try:
         instrument = Instrument.objects.get(exchange=exchange, symbol=symbol)
@@ -137,7 +136,7 @@ def _instrument_for_row(
     return instrument
 
 
-def _required_price(row: Mapping[str, Any], field: str) -> Decimal:
+def _required_price(row: Mapping[str, object], field: str) -> Decimal:
     value = _decimal(row.get(field), field)
     if value is None or value <= 0:
         raise DataMappingError("OHLC prices must be positive.")
@@ -152,7 +151,7 @@ def _check_ohlc_order(open_price: Decimal, high: Decimal, low: Decimal, close: D
 
 
 def _ohlc_values(
-    row: Mapping[str, Any],
+    row: Mapping[str, object],
 ) -> tuple[Decimal, Decimal, Decimal, Decimal, Decimal | None, int]:
     open_price = _required_price(row, "open")
     high = _required_price(row, "high")
@@ -202,21 +201,19 @@ def _store_candle(
     raise DataMappingError(f"Conflicting daily candle for {instrument.symbol} on {trading_date}.")
 
 
-class MarketDataMappingService:
-    """Map one generator row; return its candle and persistence outcome."""
+@transaction.atomic
+def map_and_persist_row(
+    row: Mapping[str, object], *, allow_instrument_creation: bool = False
+) -> tuple[DailyOHLCV, str]:
+    """Map one generator row and return its candle and persistence outcome."""
 
-    @classmethod
-    @transaction.atomic
-    def map_and_persist_row(
-        cls, row: Mapping[str, Any], *, allow_instrument_creation: bool = False
-    ) -> tuple[DailyOHLCV, str]:
-        exchange = _active_exchange(_row_text(row, "exchange"))
-        symbol = _row_text(row, "symbol")
-        trading_date, timestamp = _session_date(row, exchange)
-        instrument = _instrument_for_row(
-            exchange, symbol, row, allow_instrument_creation=allow_instrument_creation
-        )
-        return _store_candle(instrument, trading_date, timestamp, _ohlc_values(row))
+    exchange = _active_exchange(_row_text(row, "exchange"))
+    symbol = _row_text(row, "symbol")
+    trading_date, timestamp = _session_date(row, exchange)
+    instrument = _instrument_for_row(
+        exchange, symbol, row, allow_instrument_creation=allow_instrument_creation
+    )
+    return _store_candle(instrument, trading_date, timestamp, _ohlc_values(row))
 
 
 def resolve_listed_instrument(exchange_code: str, symbol: str) -> Instrument:

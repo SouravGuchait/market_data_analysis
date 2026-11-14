@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from django.db import IntegrityError, transaction
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
@@ -57,14 +55,16 @@ def _string_filters(validated: object) -> dict[str, str]:
     }
 
 
-def success(message: str, data: Any, status_code: int = status.HTTP_200_OK) -> Response:
+def success(message: str, data: object, status_code: int = status.HTTP_200_OK) -> Response:
     return Response(
         {"success": True, "message": message, "data": data, "errors": None},
         status=status_code,
     )
 
 
-def failure(message: str, errors: Any, status_code: int = status.HTTP_400_BAD_REQUEST) -> Response:
+def failure(
+    message: str, errors: object, status_code: int = status.HTTP_400_BAD_REQUEST
+) -> Response:
     return Response(
         {"success": False, "message": message, "data": None, "errors": errors},
         status=status_code,

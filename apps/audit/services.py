@@ -9,8 +9,9 @@ from __future__ import annotations
 import ipaddress
 import logging
 from collections.abc import Mapping
-from typing import Any
 from uuid import UUID
+
+from django.contrib.auth.base_user import AbstractBaseUser
 
 from apps.common.logging import get_request_id
 
@@ -37,7 +38,7 @@ def _is_sensitive_key(key: str) -> bool:
     return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
 
 
-def _sanitize_container(key: str, value: object, depth: int) -> Any:
+def _sanitize_container(key: str, value: object, depth: int) -> object:
     if isinstance(value, Mapping):
         return {
             str(child_key): _sanitize_value(str(child_key), child_value, depth + 1)
@@ -53,7 +54,7 @@ def _sanitize_text(value: str) -> str:
     return value[:_MAX_VALUE_LENGTH] + "..."
 
 
-def _sanitize_scalar(value: Any) -> Any:
+def _sanitize_scalar(value: object) -> object:
     if isinstance(value, str):
         return _sanitize_text(value)
     if value is None or isinstance(value, bool | int | float):
@@ -70,7 +71,7 @@ def _blocked_value(key: str, depth: int) -> str | None:
     return None
 
 
-def _sanitize_value(key: str, value: Any, depth: int = 0) -> Any:
+def _sanitize_value(key: str, value: object, depth: int = 0) -> object:
     blocked = _blocked_value(key, depth)
     if blocked is not None:
         return blocked
@@ -79,28 +80,39 @@ def _sanitize_value(key: str, value: Any, depth: int = 0) -> Any:
     return _sanitize_scalar(value)
 
 
-def sanitize_metadata(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
+def sanitize_metadata(metadata: Mapping[str, object] | None) -> dict[str, object]:
     """Return JSON-safe metadata with sensitive values redacted."""
 
     if not metadata:
         return {}
-    return {key: _sanitize_value(key, value) for key, value in metadata.items()}
+    cleaned: dict[str, object] = {}
+    for key, value in metadata.items():
+        cleaned[str(key)] = _sanitize_value(str(key), value)
+    return cleaned
 
 
-def _resolve_request_id(request: Any | None) -> str:
-    request_id = getattr(request, "request_id", None) if request is not None else None
-    if not request_id:
-        request_id = get_request_id()
-    if not request_id or request_id == "-":
+def _request_id_text(raw: object) -> str:
+    if raw is None:
         return ""
-    return str(request_id)[:64]
+    text = raw if isinstance(raw, str) else str(raw)
+    if not text or text == "-":
+        return ""
+    return text[:64]
 
 
-def _resolve_source_ip(request: Any | None) -> str | None:
+def _resolve_request_id(request: object | None) -> str:
+    raw = getattr(request, "request_id", None) if request is not None else None
+    if raw is None or raw == "":
+        raw = get_request_id()
+    return _request_id_text(raw)
+
+
+def _resolve_source_ip(request: object | None) -> str | None:
     """Use the socket peer address only; do not trust forwarding headers."""
 
-    raw_ip = getattr(request, "META", {}).get("REMOTE_ADDR") if request is not None else None
-    if not raw_ip:
+    meta = getattr(request, "META", None) if request is not None else None
+    raw_ip = meta.get("REMOTE_ADDR") if isinstance(meta, Mapping) else None
+    if not isinstance(raw_ip, str) or not raw_ip:
         return None
     try:
         ipaddress.ip_address(raw_ip)
@@ -114,10 +126,10 @@ def record_audit_event(  # noqa: PLR0913
     action: str,
     resource_type: str,
     status: str,
-    actor: Any | None = None,
+    actor: AbstractBaseUser | None = None,
     resource_id: str | int | UUID | None = None,
-    request: Any | None = None,
-    metadata: Mapping[str, Any] | None = None,
+    request: object | None = None,
+    metadata: Mapping[str, object] | None = None,
     request_id: str | None = None,
     source_ip: str | None = None,
 ) -> AuditEvent:
@@ -128,7 +140,7 @@ def record_audit_event(  # noqa: PLR0913
     fabricate attribution.
     """
 
-    if actor is not None and not getattr(actor, "is_authenticated", False):
+    if actor is not None and not actor.is_authenticated:
         actor = None
 
     event = AuditEvent(
@@ -151,7 +163,7 @@ def record_system_event(  # noqa: PLR0913
     resource_type: str = AuditResourceType.SYSTEM,
     status: str = AuditStatus.SUCCESS,
     resource_id: str | int | UUID | None = None,
-    metadata: Mapping[str, Any] | None = None,
+    metadata: Mapping[str, object] | None = None,
     request_id: str | None = None,
 ) -> AuditEvent:
     """Record an event with no user actor (scheduler, ingestion worker, etc.)."""

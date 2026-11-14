@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import pytest
@@ -30,7 +29,17 @@ from apps.ingestion.worker import run_ingestion_worker
 from apps.instruments.models import Instrument
 from apps.market_data.models import DailyOHLCV, Trade
 
-worker_task: Any = process_ingestion_file
+
+def _run_worker(ingestion_id: str, task_id: str) -> object:
+    apply = getattr(process_ingestion_file, "apply", None)
+    if not callable(apply):
+        raise AssertionError("process_ingestion_file is not a Celery task")
+    result = apply(args=[ingestion_id], task_id=task_id)
+    get_result = getattr(result, "get", None)
+    if not callable(get_result):
+        raise AssertionError("Celery apply did not return a result")
+    return get_result()
+
 
 DAILY_HEADER = (
     "exchange,symbol,name,asset_class,currency,date,timestamp,"
@@ -362,8 +371,7 @@ def test_celery_task_processes_queued_file(
     )
     ingestion = _queued_ingestion(rule, path, data_type=DataType.DAILY_OHLCV)
 
-    result = worker_task.apply(args=[str(ingestion.pk)], task_id="celery-1")
-    assert result.get() == IngestionState.SUCCESS
+    assert _run_worker(str(ingestion.pk), "celery-1") == IngestionState.SUCCESS
     ingestion.refresh_from_db()
     assert ingestion.state == IngestionState.SUCCESS
     assert ingestion.celery_task_id == "celery-1"

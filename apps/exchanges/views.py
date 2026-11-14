@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework.permissions import IsAuthenticated
@@ -16,7 +14,7 @@ from apps.exchanges.selectors import list_exchanges
 from apps.exchanges.serializers import ExchangeSerializer
 
 
-def success(message: str, data: Any) -> Response:
+def success(message: str, data: object) -> Response:
     return Response({"success": True, "message": message, "data": data, "errors": None})
 
 

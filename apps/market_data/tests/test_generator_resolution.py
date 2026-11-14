@@ -13,7 +13,7 @@ from apps.instruments.models import Instrument
 from apps.market_data.models import DailyOHLCV
 from apps.market_data.services import (
     DataMappingError,
-    MarketDataMappingService,
+    map_and_persist_row,
     resolve_listed_instrument,
 )
 from apps.portfolios.models import Portfolio
@@ -63,7 +63,7 @@ def test_ingestion_mapping_does_not_create_instruments_or_require_a_portfolio(ex
         "volume": "5",
     }
     with pytest.raises(DataMappingError, match="not registered"):
-        MarketDataMappingService.map_and_persist_row(row)
+        map_and_persist_row(row)
     assert Instrument.objects.count() == 0
 
     Instrument.objects.create(
@@ -73,7 +73,7 @@ def test_ingestion_mapping_does_not_create_instruments_or_require_a_portfolio(ex
         asset_class="equity",
         currency="USD",
     )
-    candle, outcome = MarketDataMappingService.map_and_persist_row(row)
+    candle, outcome = map_and_persist_row(row)
     assert outcome == "inserted"
     assert DailyOHLCV.objects.count() == 1
     assert candle.instrument.symbol == "ACME"

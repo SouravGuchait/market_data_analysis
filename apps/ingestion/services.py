@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
 from uuid import UUID
 
 from django.db import IntegrityError, transaction
@@ -61,21 +60,21 @@ class RuleScanResult:
     message: str = ""
     failed_objects: list[str] = field(default_factory=list)
 
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "rule_id": self.rule_id,
-            "rule_name": self.rule_name,
-            "status": self.status,
-            "listed": self.listed,
-            "queued": self.queued,
-            "requeued": self.requeued,
-            "duplicates": self.duplicates,
-            "unstable": self.unstable,
-            "historical": self.historical,
-            "errors": self.errors,
-            "message": self.message,
-            "failed_objects": list(self.failed_objects),
-        }
+    def as_dict(self) -> dict[str, object]:
+        summary: dict[str, object] = {}
+        summary["rule_id"] = self.rule_id
+        summary["rule_name"] = self.rule_name
+        summary["status"] = self.status
+        summary["listed"] = self.listed
+        summary["queued"] = self.queued
+        summary["requeued"] = self.requeued
+        summary["duplicates"] = self.duplicates
+        summary["unstable"] = self.unstable
+        summary["historical"] = self.historical
+        summary["errors"] = self.errors
+        summary["message"] = self.message
+        summary["failed_objects"] = list(self.failed_objects)
+        return summary
 
 
 def _safe_message(exc: BaseException) -> str:
@@ -83,7 +82,7 @@ def _safe_message(exc: BaseException) -> str:
     return (message or type(exc).__name__)[:_MAX_ERROR_LENGTH]
 
 
-def _set_rule_scan_state(rule: IngestionRule, **fields: Any) -> None:
+def _set_rule_scan_state(rule: IngestionRule, **fields: object) -> None:
     for name, value in fields.items():
         setattr(rule, name, value)
     rule.save(update_fields=[*fields, "updated_at"])
@@ -95,7 +94,7 @@ def _record_transition(
     from_state: str,
     to_state: str,
     reason: str = "",
-    metadata: dict[str, Any] | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> None:
     IngestionStateTransition.objects.create(
         ingestion=ingestion,
@@ -771,8 +770,10 @@ def dispatch_ingestion(ingestion_id: UUID) -> None:
     try:
         from .tasks import process_ingestion_file
 
-        process_task: Any = process_ingestion_file
-        async_result = process_task.delay(str(ingestion.pk))
+        delay = getattr(process_ingestion_file, "delay", None)
+        if not callable(delay):
+            raise RuntimeError("Ingestion Celery task is missing delay().")
+        async_result = delay(str(ingestion.pk))
     except Exception as exc:
         logger.exception(
             "Unable to dispatch ingestion task.",
@@ -803,7 +804,10 @@ def dispatch_ingestion(ingestion_id: UUID) -> None:
             )
         return
 
-    Ingestion.objects.filter(pk=ingestion.pk).update(celery_task_id=async_result.id)
+    task_id = getattr(async_result, "id", "")
+    Ingestion.objects.filter(pk=ingestion.pk).update(
+        celery_task_id=task_id if isinstance(task_id, str) else ""
+    )
 
     processed_at = timezone.now()
     IngestionObjectState.objects.filter(

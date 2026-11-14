@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any
 
 import pytest
 from django.conf import settings
@@ -13,8 +12,20 @@ from apps.ingestion.models import Ingestion, IngestionState
 from apps.ingestion.services import source_storage_key
 from apps.ingestion.tasks import process_ingestion_file, scan_enabled_ingestion_rules
 
-# Celery's decorator return type is opaque to the type checker in this project.
-worker_task: Any = process_ingestion_file
+
+def _run_worker(ingestion_id: str, task_id: str | None = None) -> object:
+    apply = getattr(process_ingestion_file, "apply", None)
+    if not callable(apply):
+        raise AssertionError("process_ingestion_file is not a Celery task")
+    result = (
+        apply(args=[ingestion_id])
+        if task_id is None
+        else apply(args=[ingestion_id], task_id=task_id)
+    )
+    get_result = getattr(result, "get", None)
+    if not callable(get_result):
+        raise AssertionError("Celery apply did not return a result")
+    return get_result()
 
 
 def test_beat_schedule_points_to_the_discovery_task() -> None:
@@ -49,8 +60,7 @@ def test_worker_marks_missing_source_failed(rule) -> None:
         state=IngestionState.QUEUED,
     )
 
-    result = worker_task.apply(args=[str(ingestion.pk)], task_id="task-abc")
-    assert result.get() == IngestionState.FAILED
+    assert _run_worker(str(ingestion.pk), "task-abc") == IngestionState.FAILED
 
     ingestion.refresh_from_db()
     assert ingestion.state == IngestionState.FAILED
@@ -80,5 +90,4 @@ def test_source_key_uses_the_rule_location_when_no_storage_file_exists(rule) -> 
 
 @pytest.mark.django_db
 def test_worker_boundary_ignores_unknown_ingestion() -> None:
-    result = worker_task.apply(args=["00000000-0000-0000-0000-000000000000"])
-    result.get()
+    _run_worker("00000000-0000-0000-0000-000000000000")

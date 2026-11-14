@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import cast
-
 import pytest
 
 from apps.exchanges.models import Exchange
@@ -50,7 +48,9 @@ def test_instrument_accepts_an_exchange_code(exchange):
     )
 
     assert serializer.is_valid(), serializer.errors
-    instrument = cast(Instrument, serializer.save())
+    saved = serializer.save()
+    assert isinstance(saved, Instrument)
+    instrument = saved
 
     assert instrument.exchange == exchange
     assert instrument.symbol == "ACME"
@@ -61,7 +61,9 @@ def test_instrument_still_accepts_an_exchange_primary_key(exchange):
     serializer = InstrumentWriteSerializer(data=instrument_payload(exchange=exchange.pk))
 
     assert serializer.is_valid(), serializer.errors
-    instrument = cast(Instrument, serializer.save())
+    saved = serializer.save()
+    assert isinstance(saved, Instrument)
+    instrument = saved
     assert instrument.exchange == exchange
 
 
