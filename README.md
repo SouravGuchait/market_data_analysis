@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, and **Instrument Master Seeding**. File ingestion workers and analytics calculations remain future features.
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, and **Universal CSV conversion / Pandas validation**. Celery claim/persistence (Feature 007) and analytics calculations remain future work.
 
 ## Implemented features
 
@@ -152,11 +152,214 @@ python manage.py seed_exchanges
 python manage.py seed_instruments
 python manage.py seed_market_data
 ```
+### Feature 006: Universal CSV conversion and Pandas chunk processing
+
+Every supported source (`csv`, `json`, `jsonl`, `xlsx`) is converted into bounded
+CSV staging chunks before Pandas normalization and validation. Market-data
+persistence, Celery claim, Trade rows and RejectedRow storage remain Feature 007.
+
+Pipeline entry point:
+
+```python
+from apps.ingestion.pipeline import run_conversion_pipeline
+
+result = run_conversion_pipeline(str(ingestion.id))
+```
+
+Staging layout:
+
+```text
+{INGESTION_LOCAL_ROOT}/
+  users/<owner_pk>/staging/<ingestion_uuid>/   # or system/staging/<ingestion_uuid>/
+    chunk_000001.csv
+    chunk_000002.csv
+    manifest.json
+```
+
+#### Implemented files and functions
+
+##### `apps/ingestion/converters/types.py`
+
+| Symbol | Purpose |
+| --- | --- |
+| `SOURCE_ROW_COLUMN` | Canonical staged column `_source_row` for original row numbers. |
+| `UnsupportedFileFormatError` | Unknown or unsupported extension. |
+| `FormatMismatchError` | Extension and content sniff disagree. |
+| `ConversionError` | File-level conversion failure. |
+| `ConvertRequest` | Source path, staging dir, chunk size, parser config. |
+| `ChunkMeta` | One staged chunk: number, filename, row count. |
+| `ConversionRejection` | Recoverable conversion rejection (`CONVERSION` stage). |
+| `ConversionManifest` / `as_dict()` | Manifest payload written beside staging chunks. |
+
+##### `apps/ingestion/converters/detect.py`
+
+| Function | Purpose |
+| --- | --- |
+| `normalize_extension` | Lowercase extension including the leading dot. |
+| `detect_format` | Map extension to `CSV` / `JSON` / `JSONL` / `XLSX`. |
+| `verify_format` | Sniff bytes/structure and reject mismatches. |
+| `_looks_like_csv` / `_looks_like_json_array` / `_looks_like_jsonl` / `_looks_like_xlsx` | Content sniff helpers. |
+
+##### `apps/ingestion/converters/chunk_writer.py`
+
+| Function | Purpose |
+| --- | --- |
+| `chunk_filename` | `chunk_000001.csv` style names. |
+| `chunk_path` | Staging path for one chunk. |
+| `attach_source_rows` | Attach contiguous 1-based `_source_row` values. |
+| `records_to_frame` | Build a DataFrame from record dicts with source rows. |
+| `write_frame_chunk` | Write one CSV chunk and return `ChunkMeta`. |
+
+##### `apps/ingestion/converters/csv_converter.py`
+
+| Function | Purpose |
+| --- | --- |
+| `convert_csv` | Split CSV with `pd.read_csv(chunksize=...)` into staging chunks. |
+| `_csv_reader` | Open a bounded Pandas CSV reader from parser config. |
+| `_config_str` | Read encoding/delimiter from parser config. |
+
+##### `apps/ingestion/converters/json_converter.py`
+
+| Function | Purpose |
+| --- | --- |
+| `convert_json` | Stream a JSON array with `ijson` into CSV chunks. |
+| `_iter_records` | Yield objects from the configured JSON records path. |
+| `_flush_batch` | Write one bounded batch as a staging CSV. |
+| `_record_path` | Resolve `json_records_path` (default `item`). |
+
+##### `apps/ingestion/converters/jsonl_converter.py`
+
+| Function | Purpose |
+| --- | --- |
+| `convert_jsonl` | Line-by-line JSONL conversion; malformed lines become conversion rejections. |
+| `_parse_line` / `_decoded_record` / `_rejection` | Parse one line or record a conversion rejection. |
+| `_iter_lines` | Stream `(line_number, line)` pairs. |
+
+##### `apps/ingestion/converters/xlsx_converter.py`
+
+| Function | Purpose |
+| --- | --- |
+| `convert_xlsx` | Stream worksheet rows with `openpyxl` read-only mode into CSV chunks. |
+| `_iter_sheet_rows` | Yield `(excel_row_number, record)` without loading the whole workbook. |
+| `_flush_xlsx_batch` / `_header_names` / `_row_mapping` | Header and batch helpers. |
+| `_config_int` / `_config_str` | Worksheet name and header row from parser config. |
+
+##### `apps/ingestion/converters/factory.py`
+
+| Function | Purpose |
+| --- | --- |
+| `get_converter` | Select converter callable by extension. |
+| `convert_source` | Verify format, convert, return `ConversionManifest`. |
+| `_wrap_simple` | Adapt converters that have no conversion rejections. |
+
+##### `apps/ingestion/staging.py`
+
+| Function | Purpose |
+| --- | --- |
+| `staging_root` | Resolved `INGESTION_LOCAL_ROOT`. |
+| `staging_dir_for` | Owner-isolated staging directory for one ingestion. |
+| `ensure_staging_dir` | Create the staging directory if missing. |
+| `write_manifest` / `read_manifest` | Persist or load `manifest.json`. |
+| `list_chunk_paths` | Sorted `chunk_*.csv` paths. |
+| `delete_staging` | Remove staging only; never deletes original uploads. |
+| `cleanup_staging_for_ingestion` | Retention-aware cleanup for a finished ingestion. |
+| `cleanup_abandoned_staging` | Sweep abandoned or expired staging directories. |
+
+##### `apps/ingestion/parsers/profiles.py`
+
+| Function / constant | Purpose |
+| --- | --- |
+| `DAILY_OHLCV_COLUMNS` / `TICK_DATA_COLUMNS` | Canonical column profiles. |
+| `canonical_columns` | Return the profile for a data type. |
+| `default_column_map` | Default source→canonical maps (generator column names). |
+
+##### `apps/ingestion/parsers/column_mapping.py`
+
+| Function | Purpose |
+| --- | --- |
+| `normalize_column_name` | Lowercase / underscore column names. |
+| `normalize_columns` | Rename all DataFrame columns. |
+| `resolve_column_map` | Merge defaults with rule `schema_mapping`. |
+| `apply_column_map` | Map to canonical columns and keep `_source_row`. |
+
+##### `apps/ingestion/parsers/normalization.py`
+
+| Function | Purpose |
+| --- | --- |
+| `normalize_empty_values` | Treat blank / `na` / `null` tokens as missing. |
+| `to_numeric_columns` | Coerce configured numeric fields. |
+| `to_datetime_columns` | Parse timestamps to UTC. |
+| `to_date_columns` | Parse trading dates. |
+
+##### `apps/ingestion/parsers/validation.py`
+
+| Function | Purpose |
+| --- | --- |
+| `ValidatorSpec` | One enabled validator from a rule-set snapshot. |
+| `default_validators` | Built-in daily OHLCV and tick validator lists. |
+| `load_validators` | Load DB rule rows or fall back to defaults. |
+| `apply_validators` | Split into valid / rejected / duplicate DataFrames. |
+| `_required` / `_numeric` / `_positive` / `_non_negative` / `_datetime` | Field validators. |
+| `_ohlc` | OHLC relationship checks. |
+| `_exchange_instrument_match` | Bulk exchange+symbol existence check. |
+| `_duplicate_check` | Within-chunk duplicate detection. |
+
+##### `apps/ingestion/parsers/dataframe_processor.py`
+
+| Function | Purpose |
+| --- | --- |
+| `ProcessedChunk` | One staged chunk after validation. |
+| `normalize_dataframe` | Column normalize → map → empty/numeric/datetime cleanup. |
+| `process_staged_chunk` | Read one staged CSV with defensive `chunksize` and validate. |
+
+##### `apps/ingestion/pipeline.py`
+
+| Function | Purpose |
+| --- | --- |
+| `PipelineResult` | Manifest plus accepted/rejected/duplicate/chunk counters. |
+| `stage_ingestion` | Resolve source path, convert, write manifest. |
+| `iter_processed_chunks` | Yield validated splits for every staged CSV. |
+| `run_conversion_pipeline` | Full conversion + validation without market-data persistence. |
+| `_persist_pipeline_counters` | Update ingestion row counters after validation. |
+| `_fail_conversion` | Mark ingestion `FAILED`, record transition and audit. |
+| `_audit_conversion` | User or system audit event for conversion outcome. |
+| `load_existing_manifest` | Read an existing staging manifest. |
+
+##### `apps/ingestion/models.py` (Feature 006 additions)
+
+| Symbol | Purpose |
+| --- | --- |
+| `ValidatorType` | Allowed validator names; no arbitrary expressions. |
+| `ValidationRuleSet` | Named, versioned rule set per data type. |
+| `ValidationRule` | One enabled field/frame validator with JSON parameters. |
+
+##### `apps/ingestion/tasks.py` (Feature 006 addition)
+
+| Task | Purpose |
+| --- | --- |
+| `cleanup_ingestion_staging` | Celery Beat cleanup of expired/abandoned staging. |
+| `process_ingestion_file` | Still Feature 007 orchestration boundary (claim/persist). |
+
+##### Tests
+
+| File | Coverage |
+| --- | --- |
+| `apps/ingestion/tests/test_converters.py` | CSV/JSON/JSONL/XLSX chunks, mismatches, malformed JSONL, corrupt XLSX. |
+| `apps/ingestion/tests/test_pipeline.py` | Staging + validation split, retention cleanup, source preservation. |
+| `apps/ingestion/tests/test_scopes.py` | Two tests per scope (happy + negative) across converters, mapping, validators, staging, pipeline, audit. |
+| `apps/ingestion/tests/test_tasks.py` | Staging cleanup Beat entry. |
+
+#### Not in Feature 006
+
+- Celery claim from `QUEUED` to `PROCESSING`
+- DailyOHLCV / Trade / RejectedRow persistence
+- Final ingestion success status after DB writes
+
 ### Feature 005: User file management and ingestion dispatch
 
 Authenticated users upload CSV, JSON, JSONL or XLSX files, create ingestion rules, scan
-one owned rule and dispatch each queued file as its own Celery task. Parsing and
-persistence remain later features.
+one owned rule and dispatch each queued file as its own Celery task. Conversion and
+validation are Feature 006; market-data persistence remains Feature 007.
 
 `INGESTION_LOCAL_ROOT` (Docker value `/data/ingestion`, mounted from `sample_data`) is the configured local directory. `INGESTION_S3_BUCKET` and `INGESTION_S3_PREFIX` are the configured S3 location. The client does not send a filesystem path or an S3 URI. `POST /api/v1/ingestion/files/import/` copies every supported file from those configured locations into `users/<user id>/<storage_prefix>/` in one request.
 
@@ -220,7 +423,11 @@ not required for that resolution.
 │   ├── audit/             # Append-only user and system audit records
 │   ├── common/            # Health, logging and middleware
 │   ├── exchanges/         # Exchange master data
-│   ├── ingestion/         # Reserved for a later ingestion feature
+│   ├── ingestion/         # Rules, storage, converters, staging, validation pipeline
+│   │   ├── converters/    # CSV/JSON/JSONL/XLSX → staging CSV chunks
+│   │   ├── parsers/       # Column map, normalization, validators, chunk processor
+│   │   ├── pipeline.py    # run_conversion_pipeline orchestration
+│   │   └── staging.py     # Staging dirs, manifest, retention cleanup
 │   ├── instruments/       # Instrument master data
 │   ├── market_data/       # Daily OHLCV and generator catalogs
 │   └── portfolios/        # User-owned portfolios and instrument configuration
@@ -483,6 +690,9 @@ Optional ingestion settings:
 - `INGESTION_DEFAULT_CHUNK_SIZE` (default `5000`) — row batch size stored on a new user rule when the request omits `chunk_size`.
 - `INGESTION_MAX_CHUNK_SIZE` (default `100000`) — maximum `chunk_size` accepted from the API.
 - `INGESTION_IMPORT_MAX_FILES` (default `500`) — maximum number of files one configured import copies.
+- `INGESTION_STAGING_RETENTION_SUCCESS_SECONDS` (default `3600`) — how long successful staging dirs are kept.
+- `INGESTION_STAGING_RETENTION_FAILED_SECONDS` (default `86400`) — how long failed staging dirs are kept.
+- `INGESTION_STAGING_CLEANUP_INTERVAL_SECONDS` (default `3600`) — Celery Beat cadence for staging cleanup.
 - `INGESTION_S3_BUCKET`, `INGESTION_S3_PREFIX`, `INGESTION_S3_REGION` — S3 location read by the import call. Leave the bucket empty when S3 is not used.
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` — credentials read by the AWS SDK. These are not API fields.
 

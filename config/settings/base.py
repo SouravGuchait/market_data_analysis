@@ -216,6 +216,15 @@ INGESTION_MAX_CHUNK_SIZE = max(
     env_int("INGESTION_MAX_CHUNK_SIZE", 100_000),
 )
 INGESTION_IMPORT_MAX_FILES = max(1, env_int("INGESTION_IMPORT_MAX_FILES", 500))
+INGESTION_STAGING_RETENTION_SUCCESS_SECONDS = max(
+    0, env_int("INGESTION_STAGING_RETENTION_SUCCESS_SECONDS", 3600)
+)
+INGESTION_STAGING_RETENTION_FAILED_SECONDS = max(
+    0, env_int("INGESTION_STAGING_RETENTION_FAILED_SECONDS", 86400)
+)
+INGESTION_STAGING_CLEANUP_INTERVAL_SECONDS = max(
+    60, env_int("INGESTION_STAGING_CLEANUP_INTERVAL_SECONDS", 3600)
+)
 INGESTION_S3_BUCKET = os.getenv("INGESTION_S3_BUCKET", "").strip()
 INGESTION_S3_PREFIX = os.getenv("INGESTION_S3_PREFIX", "").strip().strip("/")
 INGESTION_S3_REGION = os.getenv("INGESTION_S3_REGION", "").strip()
@@ -296,6 +305,10 @@ CELERY_BEAT_SCHEDULE = {
     "scan-enabled-ingestion-rules": {
         "task": "apps.ingestion.tasks.scan_enabled_ingestion_rules",
         "schedule": timedelta(seconds=INGESTION_SCAN_INTERVAL_SECONDS),
+    },
+    "cleanup-ingestion-staging": {
+        "task": "apps.ingestion.tasks.cleanup_ingestion_staging",
+        "schedule": timedelta(seconds=INGESTION_STAGING_CLEANUP_INTERVAL_SECONDS),
     },
 }
 # Keep Django's console + rotating-file handlers for worker and beat output

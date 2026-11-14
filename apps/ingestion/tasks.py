@@ -1,8 +1,7 @@
-"""Celery entry points for scheduled discovery and per-file dispatch.
+"""Celery entry points for scheduled discovery and per-file processing.
 
-File parsing, validation and tick persistence are implemented by the later
-ingestion-worker feature. This module only owns the scheduler task and the
-bounded per-file task boundary that the discovery service dispatches.
+Feature 006 exposes conversion and Pandas validation as services. Feature 007
+owns claiming an ingestion, calling the pipeline, and persisting batches.
 """
 
 from __future__ import annotations
@@ -36,12 +35,11 @@ def scan_enabled_ingestion_rules() -> list[dict[str, Any]]:
     acks_late=True,
 )
 def process_ingestion_file(self: Any, ingestion_id: str) -> None:
-    """Per-file worker boundary.
+    """Per-file worker boundary reserved for Feature 007 orchestration.
 
-    The task deliberately leaves the record QUEUED until the parsing and
-    validation feature implements the processing stages. Keeping the task
-    boundary here allows each discovered file to be retried independently and
-    prevents discovery from being coupled to a specific parser.
+    Conversion and validation are available through
+    ``apps.ingestion.pipeline.run_conversion_pipeline``. This task keeps the
+    record QUEUED until that orchestration claims and persists batches.
     """
 
     ingestion = (
@@ -72,4 +70,18 @@ def process_ingestion_file(self: Any, ingestion_id: str) -> None:
     )
 
 
-__all__ = ["process_ingestion_file", "scan_enabled_ingestion_rules"]
+@shared_task(name="apps.ingestion.tasks.cleanup_ingestion_staging")
+def cleanup_ingestion_staging() -> dict[str, int]:
+    """Remove abandoned or expired staging directories."""
+
+    from .staging import cleanup_abandoned_staging
+
+    removed = cleanup_abandoned_staging()
+    return {"removed": removed}
+
+
+__all__ = [
+    "cleanup_ingestion_staging",
+    "process_ingestion_file",
+    "scan_enabled_ingestion_rules",
+]

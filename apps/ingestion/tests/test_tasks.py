@@ -57,6 +57,15 @@ def test_worker_boundary_accepts_a_known_ingestion(rule) -> None:
 
 
 @pytest.mark.django_db
+def test_beat_schedule_includes_staging_cleanup() -> None:
+    entry = settings.CELERY_BEAT_SCHEDULE["cleanup-ingestion-staging"]
+    assert entry["task"] == "apps.ingestion.tasks.cleanup_ingestion_staging"
+    assert entry["schedule"] == timedelta(
+        seconds=settings.INGESTION_STAGING_CLEANUP_INTERVAL_SECONDS
+    )
+
+
+@pytest.mark.django_db
 def test_source_key_uses_the_rule_location_when_no_storage_file_exists(rule) -> None:
     ingestion = Ingestion(
         rule=rule,
