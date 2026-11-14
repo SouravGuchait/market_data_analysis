@@ -1,1 +1,1 @@
-"""Analytics app; implementation is added by a later feature."""
+"""Market analytics: candle aggregation and core return metrics."""

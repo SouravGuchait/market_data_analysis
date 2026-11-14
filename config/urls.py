@@ -21,6 +21,7 @@ urlpatterns = [
     path(prefix + "instruments/", include("apps.instruments.urls")),
     path(prefix + "ingestion/", include("apps.ingestion.urls")),
     path(prefix + "portfolios/", include("apps.portfolios.urls")),
+    path(prefix + "analytics/", include("apps.analytics.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
     path("api/docs/redoc/", SpectacularRedocView.as_view(url_name="schema"), name="redoc"),

@@ -30,6 +30,9 @@ class AuditAction(models.TextChoices):
     INGESTION_COMPLETED = "ingestion_completed", "Ingestion completed"
     INGESTION_FAILED = "ingestion_failed", "Ingestion failed"
     ANALYTICS_EXPORTED = "analytics_exported", "Analytics exported"
+    AGGREGATION_TRIGGERED = "aggregation_triggered", "Aggregation triggered"
+    AGGREGATION_COMPLETED = "aggregation_completed", "Aggregation completed"
+    AGGREGATION_FAILED = "aggregation_failed", "Aggregation failed"
     SYSTEM_EVENT = "system_event", "System event"
 
 
