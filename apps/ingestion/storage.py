@@ -319,6 +319,19 @@ def _write_limited(path: Path, source: ByteStream, max_bytes: int) -> None:
         raise StorageError("Uploaded files must not be empty.")
 
 
+def filesystem_root(relative_key: str) -> str:
+    """Return the root that holds a relative storage key.
+
+    User copies live under the system root. The upload drop folder stays on the
+    local root, so ``users/`` never appears in the project sample directory.
+    """
+
+    key = relative_key.replace("\\", "/").lstrip("/")
+    if key.startswith("users/"):
+        return str(settings.INGESTION_SYSTEM_ROOT)
+    return str(settings.INGESTION_LOCAL_ROOT)
+
+
 def get_storage_adapter(storage_backend: str, location_reference: str) -> StorageAdapter:
     """Build the adapter for a configured backend.
 
@@ -328,6 +341,6 @@ def get_storage_adapter(storage_backend: str, location_reference: str) -> Storag
     """
 
     if storage_backend in {StorageBackend.LOCAL, StorageBackend.EFS}:
-        return LocalStorageAdapter(settings.INGESTION_LOCAL_ROOT, location_reference)
+        return LocalStorageAdapter(filesystem_root(location_reference), location_reference)
 
     raise UnsupportedStorageBackendError(f"Storage backend {storage_backend!r} is not implemented.")

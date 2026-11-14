@@ -1,11 +1,10 @@
-"""Authenticated ingestion file, rule, scan and dispatch endpoints."""
+"""Authenticated ingestion file and rule endpoints."""
 
 from __future__ import annotations
 
 import logging
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
 
 from django.conf import settings
 from django.contrib.auth.models import User
@@ -28,33 +27,32 @@ from .selectors import (
     get_owned_ingestion,
     get_owned_rule,
     list_owned_ingestions,
+    list_owned_processing_logs,
     list_owned_rejections,
     list_owned_rules,
     list_storage_files,
 )
 from .serializers import (
     ConfiguredImportSerializer,
-    DispatchRequestSerializer,
     IngestionListFilterSerializer,
+    IngestionLogSerializer,
     IngestionReadSerializer,
     IngestionRuleReadSerializer,
     IngestionRuleWriteSerializer,
-    IngestionScanReadSerializer,
     RejectedRowReadSerializer,
-    ScanRequestSerializer,
     StorageFileReadSerializer,
+    ValidationRuleSetReadSerializer,
+    ValidationRuleSetWriteSerializer,
     rule_write_payload,
 )
 from .storage import StorageError
 from .user_services import (
     IngestionRequestError,
     create_user_rule,
-    dispatch_owned_ingestions,
-    resolve_owned_rule,
     retry_owned_ingestion,
-    scan_owned_rule,
     update_user_rule,
 )
+from .validation_sets import create_validation_rule_set
 
 logger = logging.getLogger("apps.ingestion.views")
 
@@ -115,7 +113,7 @@ def _prepared_import(request: Request) -> Response | tuple[list[str], str]:
         backends = ["local"]
         if settings.INGESTION_S3_BUCKET:
             backends.append("s3")
-    return backends, _text(payload, "storage_prefix") or "market"
+    return backends, _text(payload, "storage_prefix") or "files"
 
 
 def _execute_import(request: Request, backends: list[str], prefix: str) -> Response:
@@ -152,6 +150,10 @@ def _execute_import(request: Request, backends: list[str], prefix: str) -> Respo
         {
             "stored": StorageFileReadSerializer(batch.stored, many=True).data,
             "skipped": [{"name": item.name, "reason": item.reason} for item in batch.skipped],
+            "queued": [
+                {"name": item.name, "id": item.ingestion_id, "rule_id": item.rule_id}
+                for item in batch.queued
+            ],
         },
         status.HTTP_201_CREATED,
     )
@@ -175,45 +177,6 @@ def _update_owned_rule(request: Request, rule: IngestionRule) -> Response:
     except IngestionRequestError as exc:
         return _request_failure(exc)
     return success("Rule updated", IngestionRuleReadSerializer(updated).data)
-
-
-def _resolved_scan_rule(request: Request, reference: str) -> Response | IngestionRule:
-    try:
-        rule = resolve_owned_rule(_owner(request), reference)
-    except IngestionRequestError as exc:
-        return _request_failure(exc)
-    if rule is None:
-        return _not_found("Rule")
-    return rule
-
-
-def _scan_rule(request: Request) -> Response | IngestionRule:
-    serializer = ScanRequestSerializer(data=request.data)
-    if not serializer.is_valid():
-        return failure("Validation failed", serializer.errors, status.HTTP_400_BAD_REQUEST)
-    return _resolved_scan_rule(request, _text(_mapping(serializer.validated_data), "rule_id"))
-
-
-def _run_owned_scan(request: Request, rule: IngestionRule) -> Response:
-    try:
-        scan = scan_owned_rule(_owner(request), rule)
-    except IngestionRequestError as exc:
-        return _request_failure(exc)
-    _audit(
-        request,
-        action=AuditAction.INGESTION_STARTED,
-        resource_id=scan.pk,
-        audit_status=AuditStatus.SUCCESS if scan.failed_count == 0 else AuditStatus.FAILURE,
-        metadata={
-            "scope": "manual_scan",
-            "rule_name": rule.name,
-            "discovered_count": scan.discovered_count,
-            "queued_count": scan.queued_count,
-            "skipped_count": scan.skipped_count,
-            "failed_count": scan.failed_count,
-        },
-    )
-    return success("Scan completed.", IngestionScanReadSerializer(scan).data)
 
 
 def _request_failure(exc: IngestionRequestError) -> Response:
@@ -250,6 +213,25 @@ class StorageFileListView(APIView):
             list_storage_files(_owner(request)),
             StorageFileReadSerializer,
             "Files retrieved",
+        )
+
+
+class ValidationRuleSetCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(tags=["ingestion"])
+    def post(self, request: Request) -> Response:
+        serializer = ValidationRuleSetWriteSerializer(data=request.data)
+        if not serializer.is_valid():
+            return failure("Validation failed", serializer.errors, status.HTTP_400_BAD_REQUEST)
+        try:
+            rule_set = create_validation_rule_set(_mapping(serializer.validated_data))
+        except IngestionRequestError as exc:
+            return _request_failure(exc)
+        return success(
+            "Validation rule set created",
+            ValidationRuleSetReadSerializer(rule_set).data,
+            status.HTTP_201_CREATED,
         )
 
 
@@ -313,44 +295,20 @@ class IngestionRuleDetailView(APIView):
         return _update_owned_rule(request, rule)
 
 
-class IngestionScanView(APIView):
+class IngestionLogListView(APIView):
+    """Accepted and rejected rows from the ingestion log for the caller."""
+
     permission_classes = [IsAuthenticated]
-    throttle_scope = "ingestion_scan"
 
     @extend_schema(tags=["ingestion"])
-    def post(self, request: Request) -> Response:
-        rule = _scan_rule(request)
-        if isinstance(rule, Response):
-            return rule
-        return _run_owned_scan(request, rule)
-
-
-class IngestionDispatchView(APIView):
-    permission_classes = [IsAuthenticated]
-    throttle_scope = "ingestion_dispatch"
-
-    @extend_schema(tags=["ingestion"])
-    def post(self, request: Request) -> Response:
-        serializer = DispatchRequestSerializer(data=request.data)
-        if not serializer.is_valid():
-            return failure("Validation failed", serializer.errors, status.HTTP_400_BAD_REQUEST)
-        payload = _mapping(serializer.validated_data)
-        try:
-            result = dispatch_owned_ingestions(_owner(request), _text_list(payload))
-        except IngestionRequestError as exc:
-            return _request_failure(exc)
-        _audit(
+    def get(self, request: Request) -> Response:
+        return _paginated(
+            self,
             request,
-            action=AuditAction.INGESTION_STARTED,
-            resource_id="",
-            audit_status=AuditStatus.ACCEPTED,
-            metadata={
-                "scope": "dispatch",
-                "queued": result["queued"],
-                "skipped": result["skipped"],
-            },
+            list_owned_processing_logs(_owner(request)),
+            IngestionLogSerializer,
+            "Ingestion logs retrieved",
         )
-        return success("Dispatch completed.", result)
 
 
 class IngestionListView(APIView):
@@ -432,13 +390,6 @@ def _text(payload: Mapping[str, object], key: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _uuid_value(payload: Mapping[str, object], key: str) -> uuid.UUID | None:
-    value = payload.get(key)
-    if isinstance(value, uuid.UUID):
-        return value
-    return None
-
-
 def _text_list_key(payload: Mapping[str, object], key: str) -> list[str] | None:
     if key not in payload:
         return None
@@ -448,21 +399,6 @@ def _text_list_key(payload: Mapping[str, object], key: str) -> list[str] | None:
     return [item for item in value if isinstance(item, str)]
 
 
-def _text_list(payload: Mapping[str, object]) -> list[str] | None:
-    if "ingestion_ids" not in payload:
-        return None
-    value = payload["ingestion_ids"]
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str)]
-
-
-def _as_datetime(value: object) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    return None
-
-
 def _paginated(
     view: APIView,
     request: Request,
@@ -470,6 +406,7 @@ def _paginated(
     serializer_class: type[StorageFileReadSerializer]
     | type[IngestionRuleReadSerializer]
     | type[IngestionReadSerializer]
+    | type[IngestionLogSerializer]
     | type[RejectedRowReadSerializer],
     message: str,
 ) -> Response:

@@ -55,10 +55,10 @@ def _schema_mapping(ingestion: Ingestion) -> dict[str, object]:
 
 
 def _resolve_source_path(ingestion: Ingestion) -> Path:
-    from django.conf import settings
+    from apps.ingestion.storage import filesystem_root
 
-    root = Path(settings.INGESTION_LOCAL_ROOT).expanduser().resolve()
     key = source_storage_key(ingestion)
+    root = Path(filesystem_root(key)).expanduser().resolve()
     path = (root / Path(key)).resolve()
     if not path.is_relative_to(root):
         raise FileNotFoundError("Storage key escaped the ingestion root.")

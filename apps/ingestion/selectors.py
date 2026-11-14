@@ -9,7 +9,7 @@ from datetime import datetime
 from django.contrib.auth.models import User
 from django.db.models import QuerySet
 
-from .models import Ingestion, IngestionRule, RejectedRow, StorageFile
+from .models import Ingestion, IngestionRule, IngestionState, RejectedRow, StorageFile
 
 
 def list_storage_files(owner: User) -> QuerySet[StorageFile]:
@@ -26,6 +26,23 @@ def get_owned_rule(owner: User, rule_id: uuid.UUID) -> IngestionRule | None:
 
 def list_owned_ingestions(owner: User) -> QuerySet[Ingestion]:
     return Ingestion.objects.filter(owner=owner).select_related("rule", "storage_file")
+
+
+def list_owned_processing_logs(owner: User) -> QuerySet[Ingestion]:
+    """Return finished ingestion logs for one owner.
+
+    Counts are the values stored on the ingestion log. This query does not read
+    market-data tables.
+    """
+
+    return Ingestion.objects.filter(
+        owner=owner,
+        state__in=(
+            IngestionState.SUCCESS,
+            IngestionState.PARTIAL_SUCCESS,
+            IngestionState.FAILED,
+        ),
+    ).order_by("-finished_at", "-created_at")
 
 
 def get_owned_ingestion(owner: User, ingestion_id: uuid.UUID) -> Ingestion | None:

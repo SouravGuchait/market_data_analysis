@@ -11,7 +11,7 @@ This repository implements **Project Foundation**, **Custom User Authentication*
 
 - Django 5.2 and Django REST Framework.
 - MySQL 8 as the persistent database, configured through environment variables.
-- Redis cache and Celery broker/result backend.
+- Redis is the API cache. RabbitMQ is the Celery broker, and task results use that same broker.
 - Celery worker and Celery Beat configuration.
 - Modular Django apps for the foundation and the planned domain areas.
 - Custom user model from the first migration.
@@ -22,7 +22,7 @@ This repository implements **Project Foundation**, **Custom User Authentication*
 - Console and rotating-file structured logging with request correlation IDs.
 - Liveness and readiness health endpoints.
 - Exchange master-data model.
-- Docker Compose for local development with MySQL, Redis, web and worker.
+- Docker Compose for local development with MySQL, Redis, RabbitMQ, web and worker.
 - Unit and integration test structure with pytest and pytest-django.
 
 ### Custom User Authentication
@@ -169,7 +169,7 @@ result = run_conversion_pipeline(str(ingestion.id))
 Staging layout:
 
 ```text
-{INGESTION_LOCAL_ROOT}/
+{INGESTION_SYSTEM_ROOT}/
   users/<owner_pk>/staging/<ingestion_uuid>/   # or system/staging/<ingestion_uuid>/
     chunk_000001.csv
     chunk_000002.csv
@@ -256,12 +256,13 @@ Staging layout:
 
 | Function | Purpose |
 | --- | --- |
-| `staging_root` | Resolved `INGESTION_LOCAL_ROOT`. |
+| `staging_root` | Resolved `INGESTION_SYSTEM_ROOT`. |
 | `staging_dir_for` | Owner-isolated staging directory for one ingestion. |
 | `ensure_staging_dir` | Create the staging directory if missing. |
 | `write_manifest` / `read_manifest` | Persist or load `manifest.json`. |
 | `list_chunk_paths` | Sorted `chunk_*.csv` paths. |
 | `delete_staging` | Remove staging only; never deletes original uploads. |
+| `release_successful_files` | After success or partial success, delete the system copy and staging. |
 | `cleanup_staging_for_ingestion` | Retention-aware cleanup for a finished ingestion. |
 | `cleanup_abandoned_staging` | Sweep abandoned or expired staging directories. |
 
@@ -381,19 +382,106 @@ owner.
 
 ### Feature 005: User file management and ingestion dispatch
 
-Authenticated users upload CSV, JSON, JSONL or XLSX files, create ingestion rules, scan
-one owned rule and dispatch each queued file as its own Celery task. Conversion and
-validation are Feature 006; market-data persistence remains Feature 007.
+Users upload into the local drop folder or S3. The system copies a matched file
+into that user's own `files` directory, queues it, and dispatches Celery.
+Conversion and validation are Feature 006; market-data persistence remains
+Feature 007.
 
-`INGESTION_LOCAL_ROOT` (Docker value `/data/ingestion`, mounted from `sample_data`) is the configured local directory. `INGESTION_S3_BUCKET` and `INGESTION_S3_PREFIX` are the configured S3 location. The client does not send a filesystem path or an S3 URI. `POST /api/v1/ingestion/files/import/` copies every supported file from those configured locations into `users/<user id>/<storage_prefix>/` in one request.
+Upload locations, shared by whoever calls import:
+
+- Local: `sample_data` on the host, mounted in Docker as `/data/ingestion`. Put files in that folder, not under `users/`.
+- S3: `INGESTION_S3_BUCKET` and `INGESTION_S3_PREFIX`. The client does not send a bucket or a path.
+
+System store, one directory per user id, written only by import. Docker keeps it on the `mda_system` volume at `/var/lib/mda/system`, not under `sample_data`:
+
+`/var/lib/mda/system/users/<user id>/files/<filename>`
+
+Staging uses `/var/lib/mda/system/users/<user id>/staging/<ingestion id>/`. User 1 is `users/1/files`. User 2 is `users/2/files`. Import for user 2 never writes into user 1's directory, and list APIs only return the caller's rows. `storage_prefix` is accepted and stored as `files`. After a file finishes as success or partial success, the system copy and its staging directory are deleted. A failed file is kept so it can be retried.
+
+Each stored file becomes one Celery task on RabbitMQ. The worker process count is `CELERY_WORKER_CONCURRENCY` in the env file, passed to the Compose worker as `--concurrency`. The sample value is 15, so 15 files run at once and any further file stays in the queue until a process finishes. Raise or lower that number, then recreate the worker. Redis is used only as the API cache.
 
 | Call | Request | What it does |
 | --- | --- | --- |
-| `POST /api/v1/ingestion/files/import/` | JSON `{ "storage_backends": ["local", "s3"], "storage_prefix": "daily" }`. Omit `storage_backends` to use every configured location. | One request copies every `csv`, `json`, `jsonl` and `xlsx` file from `INGESTION_LOCAL_ROOT` and from the configured S3 prefix. Paths stay in the environment. Files already stored with the same content are skipped. |
-| `POST /api/v1/ingestion/rules/` | JSON rule body: name, data type, prefix, file pattern, parser config. | Creates a rule owned by the authenticated user. It does not upload or scan files. |
-| `POST /api/v1/ingestion/scan/` | JSON `{ "rule_id": "<rule name or uuid>" }`. | Looks for files already stored under that owned rule. `rule_id` accepts the rule name or its UUID. A file is queued only after its size and modification time stay unchanged for `required_stable_scans` (default `2`). This call does not dispatch Celery. |
-| `POST /api/v1/ingestion/dispatch/` | JSON `{}`, or `{ "ingestion_ids": ["<file name or uuid>", ...] }`. | Sends each eligible `QUEUED` ingestion to Celery after the database commit. Each entry is the uploaded file name or the ingestion UUID. The response returns `{ "name", "id" }` for each queued file. A repeat call does not dispatch the same record again. |
-| Celery Beat `scan_enabled_ingestion_rules` | No HTTP body. Schedule is `INGESTION_SCAN_INTERVAL_SECONDS`. | Scans administrative rules whose owner is null, and only when that rule's `scan_interval_seconds` has elapsed. It does not scan user-owned rules and does not upload files from the ingestion directory. |
+| `POST /api/v1/ingestion/validation-rule-sets/` | JSON name, data type, version, and `rules`. | Creates one validation rule set. Attach its `id` when creating an ingestion rule. |
+| `POST /api/v1/ingestion/files/import/` | JSON `{ "storage_backends": ["local", "s3"] }`. Omit the body to read local, and S3 when `INGESTION_S3_BUCKET` is set. | Copies matching files from the local drop folder and S3 into the system volume `users/<caller id>/files/`, queues them, and removes the local original. A file with no matching rule stays in the drop folder. |
+| `GET /api/v1/ingestion/logs/` | No body. Optional `page` and `page_size`. | Returns accepted, rejected and duplicate counts from the ingestion log for the caller's finished files. It does not count rows in the trade or daily candle tables. |
+| `POST /api/v1/ingestion/rules/` | JSON rule body: name, data type, prefix, file pattern, parser config, optional `validation_rule_set_id`. | Creates a rule owned by the authenticated user. The rule watches `users/<user id>/files/`. |
+| Celery Beat `scan_enabled_ingestion_rules` | No HTTP body. Schedule is `INGESTION_SCAN_INTERVAL_SECONDS`. | Scans administrative rules whose owner is null. It does not scan user-owned rules. User files are queued by import. |
+
+Create instruments that are not already listed, then a validation rule set, then
+the ingestion rules. These pairs use the seeded symbols and exchanges and do
+not repeat an existing `(exchange, symbol)`:
+
+| symbol | exchange_code | asset_class | currency |
+| --- | --- | --- | --- |
+| ACME | XNAS | equity | USD |
+| BETA | XLON | etf | EUR |
+| CHRP | XCME | equity | GBP |
+| DLTA | XNYS | equity | JPY |
+| EPSN | XNAS | crypto | CNY |
+| FBNK | XLON | equity | CHF |
+| GLXO | XCME | etf | USD |
+| HRZN | XNYS | equity | EUR |
+| INFX | XNAS | equity | GBP |
+| JVNL | XLON | crypto | JPY |
+
+```json
+POST /api/v1/instruments/
+{
+  "exchange_code": "XNAS",
+  "symbol": "ACME",
+  "name": "Acme Industrial",
+  "asset_class": "equity",
+  "currency": "USD"
+}
+```
+
+```json
+POST /api/v1/ingestion/validation-rule-sets/
+{
+  "name": "daily-strict",
+  "data_type": "DAILY_OHLCV",
+  "version": "2",
+  "rules": [
+    {"field_name": "exchange_identifier", "validator": "REQUIRED", "sort_order": 1},
+    {"field_name": "instrument_identifier", "validator": "REQUIRED", "sort_order": 2},
+    {"field_name": "trading_date", "validator": "REQUIRED", "sort_order": 3},
+    {"field_name": "open", "validator": "NUMERIC", "sort_order": 4},
+    {"field_name": "high", "validator": "NUMERIC", "sort_order": 5},
+    {"field_name": "low", "validator": "NUMERIC", "sort_order": 6},
+    {"field_name": "close", "validator": "NUMERIC", "sort_order": 7},
+    {"field_name": "volume", "validator": "NON_NEGATIVE", "sort_order": 8},
+    {"field_name": "", "validator": "OHLC_RELATIONSHIP", "sort_order": 9},
+    {"field_name": "", "validator": "EXCHANGE_INSTRUMENT_MATCH", "sort_order": 10},
+    {"field_name": "", "validator": "DUPLICATE_CHECK", "sort_order": 11}
+  ]
+}
+```
+
+Use the returned validation rule set id on the ingestion rule. `storage_prefix`
+is accepted and stored as `files`.
+
+```json
+POST /api/v1/ingestion/rules/
+{
+  "name": "ohlcv-csv",
+  "data_type": "DAILY_OHLCV",
+  "storage_prefix": "files",
+  "file_pattern": "synthetic_market_*.csv",
+  "chunk_size": 5000,
+  "parser_config": {"format": "csv"},
+  "instrument_mapping": {"instrument_identifier": "symbol"},
+  "exchange_mapping": {"exchange_identifier": "exchange"},
+  "validation_rule_set_id": "<daily-strict id>"
+}
+```
+
+Drop files into `INGESTION_LOCAL_ROOT`, then:
+
+```json
+POST /api/v1/ingestion/files/import/
+{ "storage_backends": ["local", "s3"] }
+```
 
 Administrative rules are configured in Django admin or the ORM. A rule stores
 its storage backend, relative location under `INGESTION_LOCAL_ROOT`, glob
@@ -496,12 +584,13 @@ not required for that resolution.
    ```powershell
    Copy-Item .env.example .env
    ```
-4. Start MySQL and Redis. MySQL is exposed on host port `3307` by default and
+4. Start MySQL, Redis and RabbitMQ. MySQL is exposed on host port `3307` by default and
    listens on container port `3306`. `DB_PORT` is for Django running directly
-   on your computer; Compose overrides it to `3306` for containers.
+   on your computer; Compose overrides it to `3306` for containers. RabbitMQ
+   accepts Celery tasks on port `5672`.
 
    ```powershell
-   docker compose up -d db redis
+   docker compose up -d db redis rabbitmq
    ```
 5. Apply migrations and start Django:
 
@@ -577,14 +666,15 @@ This starts:
 
 Docker Compose reads variables from the configured env file and substitutes
 `${VARIABLE}` expressions in `docker-compose.yml`. The Compose-specific values
-set container hostnames, ports, paths and Redis URLs; the regular `DB_HOST`,
+set container hostnames, ports, paths and the cache URL; the regular `DB_HOST`,
 `DB_PORT`, `CACHE_URL` and Celery URLs remain for commands run directly on your
 host. MySQL uses the non-root `DB_USER` account for Django, with
 `DB_ROOT_PASSWORD` reserved for the database administrator.
 
 Compose requires the database credentials, Django secret and allowed hosts,
 `MYSQL_HOST_PORT`, `REDIS_HOST_PORT`, `REDIS_IMAGE`, `WEB_HOST_PORT`, `COMPOSE_DB_HOST`,
-`COMPOSE_DB_PORT`, the three `COMPOSE_*` Redis URLs, and the Compose ingestion
+`COMPOSE_DB_PORT`, `COMPOSE_CACHE_URL`, `COMPOSE_CELERY_BROKER_URL`,
+`COMPOSE_CELERY_RESULT_BACKEND`, and the Compose ingestion
 path. The web and worker containers write logs to `/var/log/mda/app.log`
 in the persistent `mda_logs` Docker volume. View the web container log with
 `docker compose exec web tail -f /var/log/mda/app.log`. It stops with a clear
@@ -701,9 +791,11 @@ environment:
 - `DJANGO_ALLOWED_HOSTS`
 - `DB_NAME`, non-root `DB_USER`, `DB_PASSWORD`, `DB_ROOT_PASSWORD`, `DB_HOST`, `DB_PORT`
 - `CACHE_URL`
-- `CELERY_BROKER_URL`, `CELERY_RESULT_BACKEND`
+- `CELERY_BROKER_URL` (RabbitMQ `amqp://`), `CELERY_RESULT_BACKEND` (`rpc://`)
+- `CELERY_WORKER_CONCURRENCY` — worker processes in Compose. Sample value is `15`.
 - `LOG_FILE_PATH`
-- `INGESTION_LOCAL_ROOT`
+- `INGESTION_LOCAL_ROOT` — upload drop folder. Docker mounts `sample_data` here.
+- `INGESTION_SYSTEM_ROOT` — system copies and staging. Docker uses `/var/lib/mda/system`.
 
 Optional ingestion settings:
 

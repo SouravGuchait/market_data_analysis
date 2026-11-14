@@ -15,11 +15,13 @@ from .models import (
     DataType,
     Ingestion,
     IngestionRule,
-    IngestionScan,
     IngestionState,
     RejectedRow,
     StorageBackend,
     StorageFile,
+    ValidationRule,
+    ValidationRuleSet,
+    ValidatorType,
     _safe_storage_prefix,
 )
 
@@ -116,6 +118,28 @@ class IngestionReadSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class IngestionLogSerializer(serializers.ModelSerializer):
+    """Accepted and rejected counts from the ingestion log."""
+
+    filename = serializers.CharField(source="file_name", read_only=True)
+    status = serializers.CharField(source="state", read_only=True)
+    completed_at = serializers.DateTimeField(source="finished_at", read_only=True, allow_null=True)
+
+    class Meta:
+        model = Ingestion
+        fields = (
+            "id",
+            "filename",
+            "data_type",
+            "status",
+            "accepted_rows",
+            "rejected_rows",
+            "duplicate_rows",
+            "completed_at",
+        )
+        read_only_fields = fields
+
+
 class RejectedRowReadSerializer(serializers.ModelSerializer):
     class Meta:
         model = RejectedRow
@@ -127,27 +151,6 @@ class RejectedRowReadSerializer(serializers.ModelSerializer):
             "error_message",
             "raw_record",
             "rejected_at",
-        )
-        read_only_fields = fields
-
-
-class IngestionScanReadSerializer(serializers.ModelSerializer):
-    rule_id = serializers.UUIDField(source="rule.pk", read_only=True)
-    rule_name = serializers.CharField(source="rule.name", read_only=True)
-
-    class Meta:
-        model = IngestionScan
-        fields = (
-            "id",
-            "rule_name",
-            "rule_id",
-            "status",
-            "discovered_count",
-            "queued_count",
-            "skipped_count",
-            "failed_count",
-            "started_at",
-            "completed_at",
         )
         read_only_fields = fields
 
@@ -251,28 +254,38 @@ class ConfiguredImportSerializer(serializers.Serializer):
         return prefix
 
 
-class ScanRequestSerializer(serializers.Serializer):
-    rule_id = serializers.CharField(max_length=128)
+class ValidationRuleWriteSerializer(serializers.Serializer):
+    field_name = serializers.CharField(required=False, allow_blank=True, max_length=64, default="")
+    validator = serializers.ChoiceField(choices=ValidatorType.choices)
+    parameters = serializers.JSONField(required=False)
+    is_enabled = serializers.BooleanField(required=False, default=True)
+    sort_order = serializers.IntegerField(required=False, min_value=0)
 
-    def validate_rule_id(self, value: str) -> str:
-        reference = value.strip()
-        if not reference:
-            raise serializers.ValidationError("A rule id or rule name is required.")
-        return reference
+    def validate_parameters(self, value: object) -> dict[str, object]:
+        return _json_object(value, "Parameters must be a JSON object.")
 
 
-class DispatchRequestSerializer(serializers.Serializer):
-    ingestion_ids = serializers.ListField(
-        child=serializers.CharField(max_length=255),
-        required=False,
-        allow_empty=True,
-    )
+class ValidationRuleSetWriteSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=128)
+    data_type = serializers.ChoiceField(choices=DataType.choices)
+    version = serializers.CharField(required=False, max_length=64, default="1")
+    rules = ValidationRuleWriteSerializer(many=True, allow_empty=False)
 
-    def validate_ingestion_ids(self, value: list[str]) -> list[str]:
-        references = [item.strip() for item in value]
-        if any(not item for item in references):
-            raise serializers.ValidationError("Each ingestion reference must be a file name or id.")
-        return references
+
+class ValidationRuleReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ValidationRule
+        fields = ("id", "field_name", "validator", "parameters", "is_enabled", "sort_order")
+        read_only_fields = fields
+
+
+class ValidationRuleSetReadSerializer(serializers.ModelSerializer):
+    rules = ValidationRuleReadSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ValidationRuleSet
+        fields = ("id", "name", "data_type", "version", "is_active", "rules")
+        read_only_fields = fields
 
 
 def _json_object(value: object, message: str) -> dict[str, object]:

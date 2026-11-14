@@ -203,6 +203,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 APP_VERSION = env_str("APP_VERSION", "0.1.0")
 INGESTION_LOCAL_ROOT = str(resolve_path(env_str("INGESTION_LOCAL_ROOT", "sample_data")))
+INGESTION_SYSTEM_ROOT = str(resolve_path(env_str("INGESTION_SYSTEM_ROOT", "var/mda-system")))
 INGESTION_SCAN_INTERVAL_SECONDS = max(1, env_int("INGESTION_SCAN_INTERVAL_SECONDS", 60))
 INGESTION_HASH_CHUNK_SIZE_BYTES = max(1, env_int("INGESTION_HASH_CHUNK_SIZE_BYTES", 1024 * 1024))
 INGESTION_MAX_UPLOAD_BYTES = max(1, env_int("INGESTION_MAX_UPLOAD_BYTES", 50 * 1024 * 1024))
@@ -261,8 +262,6 @@ REST_FRAMEWORK = {
         "user_profile": "5/min",  # High limit for logged-in users checking profiles
         "user": "1000/hour",
         "ingestion_upload": "30/min",
-        "ingestion_scan": "10/min",
-        "ingestion_dispatch": "20/min",
     },
 }
 
@@ -310,6 +309,9 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TIMEZONE = TIME_ZONE
 CELERY_ENABLE_UTC = True
 CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
+# One unacked task per process, so a file waits in RabbitMQ until a worker is free.
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_ACKS_LATE = True
 CELERY_BEAT_SCHEDULE = {
     "scan-enabled-ingestion-rules": {
         "task": "apps.ingestion.tasks.scan_enabled_ingestion_rules",

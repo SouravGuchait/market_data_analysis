@@ -23,6 +23,7 @@ os.environ["CELERY_BROKER_URL"] = "memory://"
 os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
 os.environ["LOG_FILE_ENABLED"] = "False"
 os.environ.setdefault("INGESTION_LOCAL_ROOT", "data/test-ingestion")
+os.environ.setdefault("INGESTION_SYSTEM_ROOT", "data/test-system")
 
 from .base import *  # noqa: E402,F403
 

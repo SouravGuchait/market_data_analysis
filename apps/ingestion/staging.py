@@ -20,7 +20,7 @@ MANIFEST_NAME = "manifest.json"
 
 
 def staging_root() -> Path:
-    return Path(settings.INGESTION_LOCAL_ROOT).expanduser().resolve()
+    return Path(settings.INGESTION_SYSTEM_ROOT).expanduser().resolve()
 
 
 def staging_dir_for(ingestion: Ingestion) -> Path:
@@ -56,6 +56,45 @@ def read_manifest(staging_dir: Path) -> dict[str, object]:
 
 def list_chunk_paths(staging_dir: Path) -> list[Path]:
     return sorted(staging_dir.glob("chunk_*.csv"))
+
+
+def release_successful_files(ingestion: Ingestion) -> None:
+    """Remove the system copy and staging after parsing has finished cleanly."""
+
+    if ingestion.state not in {IngestionState.SUCCESS, IngestionState.PARTIAL_SUCCESS}:
+        return
+    delete_staging(ingestion)
+    _delete_system_copy(ingestion)
+
+
+def _delete_system_copy(ingestion: Ingestion) -> None:
+    storage_file = ingestion.storage_file
+    if storage_file is None:
+        return
+    key = storage_file.storage_key.replace("\\", "/").lstrip("/")
+    if not key.startswith("users/"):
+        return
+    root = staging_root()
+    path = (root / key).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return
+    path.unlink()
+    _remove_empty_dirs(path.parent, root)
+    storage_file.is_active = False
+    storage_file.save(update_fields=["is_active"])
+    logger.info(
+        "Deleted processed system file.",
+        extra={"ingestion_id": str(ingestion.pk), "storage_key": key},
+    )
+
+
+def _remove_empty_dirs(start: Path, root: Path) -> None:
+    current = start
+    while current != root and current.is_relative_to(root):
+        if any(current.iterdir()):
+            return
+        current.rmdir()
+        current = current.parent
 
 
 def delete_staging(ingestion: Ingestion) -> bool:

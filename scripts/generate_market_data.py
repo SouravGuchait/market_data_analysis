@@ -1,9 +1,9 @@
 # pyright: reportAny=false, reportExplicitAny=false
 """Deterministic synthetic market-data generator for development and testing.
 
-Generates clean and intentionally dirty fixtures in CSV, JSON, and XLSX with a
-consistent schema. Runs offline: no Django configuration, database, or market
-API is required.
+Generates clean and intentionally dirty fixtures in CSV, JSON, JSONL, and XLSX
+with a consistent schema. Optional tick files use the same four formats. Runs
+offline: no Django configuration, database, or market API is required.
 
 Row count can be given as an exponent: --exponent 4 (base 10) generates
 10**4 = 10,000 clean rows. Output files carry the UTC run timestamp in their
@@ -17,11 +17,12 @@ Examples:
     python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 --seed 43 --output-dir sample_data
 """
 
-import secrets
 import argparse
 import json
 import logging
 import math
+import secrets
+from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -303,13 +304,48 @@ def write_csv(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None
     pd.DataFrame(rows, columns=pd.Index(columns)).to_csv(path, index=False)
 
 
-def write_json(rows: list[Row], path: Path) -> None:
-    payload = [{key: row.get(key) for key in COLUMNS} for row in rows]
+def write_json(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None:
+    payload = [{key: row.get(key) for key in columns} for row in rows]
     _ = path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def write_jsonl(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None:
+    """Write one JSON object per line, using the selected columns."""
+    lines = [json.dumps({key: row.get(key) for key in columns}) for row in rows]
+    text = "\n".join(lines)
+    if text:
+        text += "\n"
+    _ = path.write_text(text, encoding="utf-8")
 
 
 def write_xlsx(rows: list[Row], path: Path, columns: list[str] = COLUMNS) -> None:
     pd.DataFrame(rows, columns=pd.Index(columns)).to_excel(path, index=False)
+
+
+RowWriter = Callable[[list[Row], Path, list[str]], None]
+WRITERS: dict[str, RowWriter] = {
+    "csv": write_csv,
+    "json": write_json,
+    "jsonl": write_jsonl,
+    "xlsx": write_xlsx,
+}
+
+
+def write_payload(
+    output_dir: Path,
+    stem: str,
+    rows: list[Row],
+    columns: list[str],
+    counts: dict[str, int],
+) -> None:
+    """Write one dataset as CSV, JSON, JSONL, and XLSX."""
+    for extension, writer in WRITERS.items():
+        if extension == "xlsx" and len(rows) > XLSX_MAX_ROWS:
+            logger.warning("Skipping %s.xlsx: %d rows exceeds Excel limit", stem, len(rows))
+            continue
+        name = f"{stem}.{extension}"
+        writer(rows, output_dir / name, columns)
+        counts[name] = len(rows)
 
 
 def resolve_row_target(symbols: int, days: int, exponent: int | None, base: int) -> tuple[int, int]:
@@ -332,10 +368,11 @@ def generate(
     base: int = 10,
     ticks_per_day: int = 0,
 ) -> dict[str, int]:
-    """Write clean and dirty fixtures in all three formats; return row counts.
+    """Write clean, dirty, and optional tick fixtures; return row counts.
 
-    With `exponent`, exactly base**exponent clean rows are produced.
-    File names are stamped with the UTC run time, e.g.
+    Clean and dirty market data, and ticks when requested, are written as CSV,
+    JSON, JSONL, and XLSX. With `exponent`, exactly base**exponent clean rows
+    are produced. File names are stamped with the UTC run time, e.g.
     synthetic_market_clean_20261109T101500Z.csv.
     """
     resolved_seed = seed if seed is not None else secrets.randbits(32)
@@ -358,32 +395,11 @@ def generate(
     out.mkdir(parents=True, exist_ok=True)
 
     counts: dict[str, int] = {}
-    writers = {"csv": write_csv, "json": write_json, "xlsx": write_xlsx}
-    payloads = {"clean": rows, "dirty": dirty_rows}
-    for extension, writer in writers.items():
-        for label, payload in payloads.items():
-            if extension == "xlsx" and len(payload) > XLSX_MAX_ROWS:
-                logger.warning("Skipping %s xlsx: %d rows exceeds Excel limit", label, len(payload))
-                continue
-            name = f"synthetic_market_{label}_{run_stamp}.{extension}"
-            writer(payload, out / name)
-            counts[name] = len(payload)
-
-    # Optional tick fixture, separate from the daily schema.
+    write_payload(out, f"synthetic_market_clean_{run_stamp}", rows, COLUMNS, counts)
+    write_payload(out, f"synthetic_market_dirty_{run_stamp}", dirty_rows, COLUMNS, counts)
     if ticks_per_day > 0:
         ticks = generate_ticks(rows, ticks_per_day, rng)
-        name = f"synthetic_ticks_{run_stamp}.csv"
-        write_csv(ticks, out / name, columns=TICK_COLUMNS)
-        counts[name] = len(ticks)
-
-    # Empty fixtures: parsers must reject these without confusing schemas.
-    for extension in ("csv", "json", "xlsx"):
-        name = f"synthetic_market_empty_{run_stamp}.{extension}"
-        counts[name] = 0
-        if extension == "xlsx":
-            write_xlsx([], out / name)
-        else:
-            _ = (out / name).write_bytes(b"")
+        write_payload(out, f"synthetic_ticks_{run_stamp}", ticks, TICK_COLUMNS, counts)
 
     # Unexpected extra column appended to an otherwise valid subset.
     unexpected = [dict(row, unexpected_extra="ignore-me") for row in rows[: max(len(rows) // 4, 1)]]
@@ -408,7 +424,9 @@ class Args(argparse.Namespace):
 
 def parse_args(argv: list[str] | None = None) -> Args:
     parser = argparse.ArgumentParser(
-        description="Generate synthetic OHLCV fixtures (clean and dirty) in CSV, JSON, and XLSX."
+        description=(
+            "Generate synthetic OHLCV and tick fixtures in CSV, JSON, JSONL, and XLSX."
+        )
     )
     _ = parser.add_argument(
         "--symbols", type=int, default=5, help="number of instruments (default: 5)"
@@ -435,7 +453,10 @@ def parse_args(argv: list[str] | None = None) -> Args:
         "--ticks-per-day",
         type=int,
         default=0,
-        help=f"also write a tick-level CSV with this many trades per daily candle (4-{MAX_TICKS_PER_DAY}; default: 0 = no ticks)",
+        help=(
+            "also write tick CSV, JSON, JSONL, and XLSX with this many trades "
+            f"per daily candle (4-{MAX_TICKS_PER_DAY}; default: 0 = no ticks)"
+        ),
     )
     _ = parser.add_argument(
         "--seed",
