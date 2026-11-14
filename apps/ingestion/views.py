@@ -28,6 +28,7 @@ from .selectors import (
     get_owned_ingestion,
     get_owned_rule,
     list_owned_ingestions,
+    list_owned_rejections,
     list_owned_rules,
     list_storage_files,
 )
@@ -39,6 +40,7 @@ from .serializers import (
     IngestionRuleReadSerializer,
     IngestionRuleWriteSerializer,
     IngestionScanReadSerializer,
+    RejectedRowReadSerializer,
     ScanRequestSerializer,
     StorageFileReadSerializer,
     rule_write_payload,
@@ -378,11 +380,7 @@ class IngestionDetailView(APIView):
 
 
 class IngestionRejectionListView(APIView):
-    """Rejected-row storage belongs to the parsing feature.
-
-    The endpoint is owner-scoped now and returns an empty page until that
-    feature records row-level rejections.
-    """
+    """List rejected rows for one owned ingestion."""
 
     permission_classes = [IsAuthenticated]
 
@@ -391,9 +389,13 @@ class IngestionRejectionListView(APIView):
         ingestion = get_owned_ingestion(_owner(request), ingestion_id)
         if ingestion is None:
             return _not_found("Ingestion")
-        return success(
+        queryset = list_owned_rejections(_owner(request), ingestion.pk)
+        return _paginated(
+            self,
+            request,
+            queryset,
+            RejectedRowReadSerializer,
             "Rejections retrieved",
-            {"count": 0, "next": None, "previous": None, "results": []},
         )
 
 
@@ -467,7 +469,8 @@ def _paginated(
     queryset: object,
     serializer_class: type[StorageFileReadSerializer]
     | type[IngestionRuleReadSerializer]
-    | type[IngestionReadSerializer],
+    | type[IngestionReadSerializer]
+    | type[RejectedRowReadSerializer],
     message: str,
 ) -> Response:
     paginator = IngestionPagination()

@@ -36,7 +36,7 @@ def test_discovery_task_returns_per_rule_summaries(rule, inbox, write_file) -> N
 
 
 @pytest.mark.django_db
-def test_worker_boundary_accepts_a_known_ingestion(rule) -> None:
+def test_worker_marks_missing_source_failed(rule) -> None:
     ingestion = Ingestion.objects.create(
         rule=rule,
         storage_backend=rule.storage_backend,
@@ -45,14 +45,15 @@ def test_worker_boundary_accepts_a_known_ingestion(rule) -> None:
         file_size_bytes=10,
         file_modified_at=timezone.now(),
         content_hash="b" * 64,
+        data_type="DAILY_OHLCV",
         state=IngestionState.QUEUED,
     )
 
     result = worker_task.apply(args=[str(ingestion.pk)], task_id="task-abc")
-    result.get()
+    assert result.get() == IngestionState.FAILED
 
     ingestion.refresh_from_db()
-    assert ingestion.state == IngestionState.QUEUED
+    assert ingestion.state == IngestionState.FAILED
     assert ingestion.celery_task_id == "task-abc"
 
 

@@ -1,24 +1,34 @@
-"""Celery entry points for scheduled discovery and per-file processing.
-
-Feature 006 exposes conversion and Pandas validation as services. Feature 007
-owns claiming an ingestion, calling the pipeline, and persisting batches.
-"""
+"""Celery entry points for scheduled discovery and per-file processing."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Protocol
 
 from celery import shared_task
+from celery.exceptions import MaxRetriesExceededError, SoftTimeLimitExceeded
+from django.db import OperationalError
+from django.db.utils import InterfaceError
 
-from .models import Ingestion
-from .services import scan_enabled_rules, source_storage_key
+from .services import scan_enabled_rules
+from .worker import handle_worker_retry_exhausted, max_task_retries, run_ingestion_worker
 
 logger = logging.getLogger("apps.ingestion.tasks")
 
 
+class _TaskRequest(Protocol):
+    id: str | None
+
+
+class _BoundTask(Protocol):
+    request: _TaskRequest
+    max_retries: int
+
+    def retry(self, exc: BaseException | None = None) -> None: ...
+
+
 @shared_task(name="apps.ingestion.tasks.scan_enabled_ingestion_rules")
-def scan_enabled_ingestion_rules() -> list[dict[str, Any]]:
+def scan_enabled_ingestion_rules() -> list[dict[str, object]]:
     """Scan every enabled rule that is due and return per-rule summaries."""
 
     results = scan_enabled_rules()
@@ -33,41 +43,26 @@ def scan_enabled_ingestion_rules() -> list[dict[str, Any]]:
     bind=True,
     name="apps.ingestion.tasks.process_ingestion_file",
     acks_late=True,
+    max_retries=5,
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
 )
-def process_ingestion_file(self: Any, ingestion_id: str) -> None:
-    """Per-file worker boundary reserved for Feature 007 orchestration.
+def process_ingestion_file(self: _BoundTask, ingestion_id: str) -> str | None:
+    """Claim one ingestion, process staged chunks, and persist market data."""
 
-    Conversion and validation are available through
-    ``apps.ingestion.pipeline.run_conversion_pipeline``. This task keeps the
-    record QUEUED until that orchestration claims and persists batches.
-    """
-
-    ingestion = (
-        Ingestion.objects.select_related("rule", "storage_file").filter(pk=ingestion_id).first()
-    )
-    if ingestion is None:
-        logger.warning(
-            "Ingestion worker received an unknown ingestion id.",
-            extra={"ingestion_id": ingestion_id},
-        )
-        return
-
-    task_id = getattr(self.request, "id", None)
-    if task_id and ingestion.celery_task_id != task_id:
-        Ingestion.objects.filter(pk=ingestion.pk).update(celery_task_id=task_id)
-
-    logger.info(
-        "Ingestion file queued for worker processing.",
-        extra={
-            "ingestion_id": str(ingestion.pk),
-            "task_id": task_id,
-            "state": ingestion.state,
-            "file_name": ingestion.file_name,
-            "data_type": ingestion.data_type,
-            "chunk_size": ingestion.chunk_size,
-            "source_key": source_storage_key(ingestion),
-        },
-    )
+    task_id = self.request.id or ""
+    try:
+        return run_ingestion_worker(ingestion_id, task_id=task_id)
+    except SoftTimeLimitExceeded as exc:
+        handle_worker_retry_exhausted(ingestion_id, exc)
+        raise
+    except (OperationalError, InterfaceError, ConnectionError, TimeoutError, OSError) as exc:
+        try:
+            self.retry(exc=exc)
+        except MaxRetriesExceededError:
+            handle_worker_retry_exhausted(ingestion_id, exc)
+        return None
 
 
 @shared_task(name="apps.ingestion.tasks.cleanup_ingestion_staging")
@@ -80,8 +75,15 @@ def cleanup_ingestion_staging() -> dict[str, int]:
     return {"removed": removed}
 
 
+def configure_process_task_limits() -> None:
+    """Apply settings-backed retry/time limits onto the bound task."""
+
+    process_ingestion_file.max_retries = max_task_retries()
+
+
 __all__ = [
     "cleanup_ingestion_staging",
+    "configure_process_task_limits",
     "process_ingestion_file",
     "scan_enabled_ingestion_rules",
 ]

@@ -589,3 +589,88 @@ class ValidationRule(models.Model):
 
     def __str__(self) -> str:
         return f"{self.validator}:{self.field_name or '*'}"
+
+
+class BatchStatus(models.TextChoices):
+    """Lifecycle of one ingestion batch checkpoint."""
+
+    PROCESSING = "processing", "Processing"
+    COMPLETED = "completed", "Completed"
+    FAILED = "failed", "Failed"
+
+
+class IngestionBatch(models.Model):
+    """Idempotent checkpoint for one processed DataFrame chunk."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ingestion = models.ForeignKey(Ingestion, on_delete=models.CASCADE, related_name="batches")
+    batch_number = models.PositiveIntegerField()
+    source_start_row = models.PositiveIntegerField(default=0)
+    source_end_row = models.PositiveIntegerField(default=0)
+    rows_read = models.PositiveIntegerField(default=0)
+    accepted_rows = models.PositiveIntegerField(default=0)
+    rejected_rows = models.PositiveIntegerField(default=0)
+    duplicate_rows = models.PositiveIntegerField(default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=BatchStatus.choices,
+        default=BatchStatus.PROCESSING,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "mda_ingestion_batches"
+        ordering = ["ingestion", "batch_number"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["ingestion", "batch_number"],
+                name="unique_ingestion_batch_number",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["ingestion", "status"],
+                name="idx_ing_batch_status",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"batch#{self.batch_number}:{self.status}"
+
+
+class RejectedRow(models.Model):
+    """One rejected source row retained for investigation."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    ingestion = models.ForeignKey(Ingestion, on_delete=models.CASCADE, related_name="rejections")
+    batch = models.ForeignKey(
+        IngestionBatch,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="rejections",
+    )
+    source_row_number = models.PositiveIntegerField()
+    reason_code = models.CharField(max_length=64)
+    field_name = models.CharField(max_length=64, blank=True, default="")
+    error_message = models.CharField(max_length=512)
+    raw_record = models.JSONField(default=default_mapping, blank=True)
+    rejected_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "mda_rejected_rows"
+        ordering = ["ingestion", "source_row_number", "id"]
+        indexes = [
+            models.Index(
+                fields=["ingestion", "source_row_number"],
+                name="idx_rejected_ing_row",
+            ),
+            models.Index(
+                fields=["ingestion", "reason_code"],
+                name="idx_rejected_ing_reason",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.source_row_number}:{self.reason_code}"

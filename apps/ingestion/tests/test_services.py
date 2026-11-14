@@ -31,6 +31,17 @@ from apps.ingestion.services import (
 from apps.ingestion.storage import LocalStorageAdapter
 
 
+@pytest.fixture(autouse=True)
+def stub_worker_dispatch():
+    """Discovery tests assert queueing; Feature 007 processing is covered elsewhere."""
+
+    with patch(
+        "apps.ingestion.tasks.process_ingestion_file.delay",
+        side_effect=lambda ingestion_id: SimpleNamespace(id=f"task-{ingestion_id}"),
+    ):
+        yield
+
+
 def _make_rule(**overrides) -> IngestionRule:
     values = {
         "name": "test-inbox",

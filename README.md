@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, and **Universal CSV conversion / Pandas validation**. Celery claim/persistence (Feature 007) and analytics calculations remain future work.
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, and **Chunk-based Celery processing with batch persistence** (Feature 007). Candle aggregation (Feature 008) and analytics calculations remain future work.
 
 ## Implemented features
 
@@ -355,6 +355,30 @@ Staging layout:
 - DailyOHLCV / Trade / RejectedRow persistence
 - Final ingestion success status after DB writes
 
+### Feature 007: Chunk-based Celery processing and batch persistence
+
+`process_ingestion_file(ingestion_id)` claims one `QUEUED`/`RETRYING` ingestion,
+reuses the Feature 006 staging/validation pipeline, and persists each chunk
+before the next chunk is read.
+
+| Step | Behaviour |
+| --- | --- |
+| Atomic claim | Conditional DB update `QUEUED`/`RETRYING` → `PROCESSING` |
+| Convert + validate | Staging CSV chunks via Feature 006 services |
+| Persist valid rows | `DailyOHLCV` or `Trade` bulk inserts |
+| Persist rejects | `RejectedRow` batches (conversion + validation + OHLCV conflicts) |
+| Checkpoints | `IngestionBatch` unique on `(ingestion, batch_number)` |
+| Finalize | `SUCCESS` / `PARTIAL_SUCCESS` / `FAILED` from counters |
+| Audit | Started, completed, partial, failed, retry requested/exhausted |
+
+Duplicate policy: identical OHLCV rows count as duplicates; conflicting OHLCV
+values become rejections (never silent overwrite). Trade dedupe prefers
+exchange trade ID, then sequence number, then a SHA-256 fallback key. Empty
+readable files finalize as `SUCCESS`. Candle aggregation remains Feature 008.
+
+`GET /api/v1/ingestion/{id}/rejections/` returns persisted rejected rows for the
+owner.
+
 ### Feature 005: User file management and ingestion dispatch
 
 Authenticated users upload CSV, JSON, JSONL or XLSX files, create ingestion rules, scan
@@ -693,6 +717,10 @@ Optional ingestion settings:
 - `INGESTION_STAGING_RETENTION_SUCCESS_SECONDS` (default `3600`) — how long successful staging dirs are kept.
 - `INGESTION_STAGING_RETENTION_FAILED_SECONDS` (default `86400`) — how long failed staging dirs are kept.
 - `INGESTION_STAGING_CLEANUP_INTERVAL_SECONDS` (default `3600`) — Celery Beat cadence for staging cleanup.
+- `INGESTION_REJECTED_RAW_MAX_BYTES` (default `2048`) — max UTF-8 size of one rejected raw record payload.
+- `INGESTION_TASK_MAX_RETRIES` (default `5`) — Celery retries for transient ingestion failures.
+- `INGESTION_TASK_SOFT_TIME_LIMIT_SECONDS` (default `1800`) — soft time limit for `process_ingestion_file`.
+- `INGESTION_TASK_TIME_LIMIT_SECONDS` (default `2100`) — hard time limit for `process_ingestion_file`.
 - `INGESTION_S3_BUCKET`, `INGESTION_S3_PREFIX`, `INGESTION_S3_REGION` — S3 location read by the import call. Leave the bucket empty when S3 is not used.
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` — credentials read by the AWS SDK. These are not API fields.
 
