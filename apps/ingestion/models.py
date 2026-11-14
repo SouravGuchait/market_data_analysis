@@ -519,3 +519,73 @@ class IngestionScan(models.Model):
 
     def __str__(self) -> str:
         return f"{self.rule.name} ({self.status})"
+
+
+class ValidatorType(models.TextChoices):
+    """Supported row validators. Arbitrary expressions are never executed."""
+
+    REQUIRED = "REQUIRED", "Required"
+    NUMERIC = "NUMERIC", "Numeric"
+    POSITIVE = "POSITIVE", "Positive"
+    NON_NEGATIVE = "NON_NEGATIVE", "Non-negative"
+    MIN_VALUE = "MIN_VALUE", "Minimum value"
+    MAX_VALUE = "MAX_VALUE", "Maximum value"
+    MAX_DECIMAL_PLACES = "MAX_DECIMAL_PLACES", "Maximum decimal places"
+    DATETIME = "DATETIME", "Datetime"
+    ENUM = "ENUM", "Enumeration"
+    OHLC_RELATIONSHIP = "OHLC_RELATIONSHIP", "OHLC relationship"
+    INSTRUMENT_EXISTS = "INSTRUMENT_EXISTS", "Instrument exists"
+    EXCHANGE_EXISTS = "EXCHANGE_EXISTS", "Exchange exists"
+    EXCHANGE_INSTRUMENT_MATCH = "EXCHANGE_INSTRUMENT_MATCH", "Exchange/instrument match"
+    DUPLICATE_CHECK = "DUPLICATE_CHECK", "Duplicate check"
+
+
+class ValidationRuleSet(models.Model):
+    """Named, versioned set of field validators for one data type."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=128)
+    data_type = models.CharField(max_length=20, choices=DataType.choices)
+    version = models.CharField(max_length=64, default="1")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "mda_validation_rule_sets"
+        ordering = ["name", "version"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["name", "version"],
+                name="unique_validation_rule_set_name_version",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.name}@{self.version}"
+
+
+class ValidationRule(models.Model):
+    """One enabled validator belonging to a rule set."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    rule_set = models.ForeignKey(
+        ValidationRuleSet,
+        on_delete=models.CASCADE,
+        related_name="rules",
+    )
+    field_name = models.CharField(max_length=64, blank=True, default="")
+    validator = models.CharField(max_length=64, choices=ValidatorType.choices)
+    parameters = models.JSONField(default=default_mapping, blank=True)
+    is_enabled = models.BooleanField(default=True)
+    sort_order = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        db_table = "mda_validation_rules"
+        ordering = ["rule_set", "sort_order", "id"]
+        indexes = [
+            models.Index(fields=["rule_set", "sort_order"], name="idx_validation_rule_order"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.validator}:{self.field_name or '*'}"
