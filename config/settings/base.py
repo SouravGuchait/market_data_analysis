@@ -262,6 +262,8 @@ REST_FRAMEWORK = {
         "user_profile": "5/min",  # High limit for logged-in users checking profiles
         "user": "1000/hour",
         "ingestion_upload": "30/min",
+        "analytics_read": "120/min",
+        "analytics_aggregate": "30/min",
     },
 }
 

@@ -162,3 +162,84 @@ class Trade(models.Model):
 
     def __str__(self) -> str:
         return f"{self.instrument.symbol}@{self.event_timestamp}"
+
+
+class CandleTimeframe(models.TextChoices):
+    """Supported trade-derived candle intervals."""
+
+    ONE_MINUTE = "1m", "1 minute"
+    FIVE_MINUTES = "5m", "5 minutes"
+    FIFTEEN_MINUTES = "15m", "15 minutes"
+    THIRTY_MINUTES = "30m", "30 minutes"
+    ONE_HOUR = "1h", "1 hour"
+    ONE_DAY = "1d", "1 day"
+
+
+class Candle(models.Model):
+    """OHLCV candle aggregated from persisted Trade records.
+
+    Distinct from :class:`DailyOHLCV`, which stores imported daily bars.
+    API field ``timestamp`` maps to ``bucket_start`` and is not stored separately.
+    """
+
+    instrument = models.ForeignKey(
+        Instrument, on_delete=models.CASCADE, related_name="candles"
+    )
+    exchange = models.ForeignKey(Exchange, on_delete=models.PROTECT, related_name="candles")
+    timeframe = models.CharField(max_length=8, choices=CandleTimeframe.choices)
+    bucket_start = models.DateTimeField()
+    bucket_end = models.DateTimeField()
+    open = models.DecimalField(max_digits=20, decimal_places=6)
+    high = models.DecimalField(max_digits=20, decimal_places=6)
+    low = models.DecimalField(max_digits=20, decimal_places=6)
+    close = models.DecimalField(max_digits=20, decimal_places=6)
+    volume = models.DecimalField(max_digits=28, decimal_places=8)
+    trade_count = models.PositiveIntegerField()
+    is_complete = models.BooleanField(default=False)
+    aggregation_version = models.PositiveIntegerField(default=1)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "mda_candles"
+        ordering = ["bucket_start", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["instrument", "exchange", "timeframe", "bucket_start"],
+                name="unique_candle_bucket",
+            ),
+            models.CheckConstraint(condition=Q(open__gt=0), name="candle_open_positive"),
+            models.CheckConstraint(condition=Q(high__gt=0), name="candle_high_positive"),
+            models.CheckConstraint(condition=Q(low__gt=0), name="candle_low_positive"),
+            models.CheckConstraint(condition=Q(close__gt=0), name="candle_close_positive"),
+            models.CheckConstraint(
+                condition=Q(high__gte=F("open")) & Q(high__gte=F("close")),
+                name="candle_high_bounds",
+            ),
+            models.CheckConstraint(
+                condition=Q(low__lte=F("open")) & Q(low__lte=F("close")),
+                name="candle_low_bounds",
+            ),
+            models.CheckConstraint(condition=Q(high__gte=F("low")), name="candle_high_gte_low"),
+            models.CheckConstraint(condition=Q(volume__gte=0), name="candle_volume_non_negative"),
+            models.CheckConstraint(
+                condition=Q(trade_count__gt=0), name="candle_trade_count_positive"
+            ),
+            models.CheckConstraint(
+                condition=Q(bucket_end__gt=F("bucket_start")),
+                name="candle_bucket_end_after_start",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=["instrument", "timeframe", "bucket_start"],
+                name="idx_candle_instrument_tf_start",
+            ),
+            models.Index(
+                fields=["exchange", "timeframe", "bucket_start"],
+                name="idx_candle_exchange_tf_start",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.instrument.symbol} {self.timeframe}@{self.bucket_start}"

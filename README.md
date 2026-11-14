@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, and **Chunk-based Celery processing with batch persistence** (Feature 007). Candle aggregation (Feature 008) and analytics calculations remain future work.
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), and **Candle aggregation with daily returns** (Feature 008). Advanced indicators remain future work (Features 009+).
 
 ## Implemented features
 
@@ -211,15 +211,15 @@ address; forwarding headers are not trusted.
 
 Records are created for registration, login success and failure, logout,
 password-reset request and completion, portfolio creation, update and deletion,
-and portfolio instrument addition and removal. Ingestion and analytics actions
-have constants in the audit model, and `apps.audit.services.record_system_event`
-records an unattributed system event for future asynchronous workflows.
+portfolio instrument addition and removal, ingestion lifecycle events, and
+aggregation trigger / completion / failure events (Feature 008). Ordinary
+analytics GET requests are not audited as exports.
+`apps.audit.services.record_system_event` records unattributed system events for
+ingestion-triggered aggregation and other worker workflows.
 
 The audit model is append-only: application code cannot update or delete a
 stored record, and no write API is exposed. Deleting an actor user preserves the
 audit row and sets the actor to null.
-
-Ingestion workers are future work.
 
 ### Feature 004.5: Instrument seeding and portfolio instrument management
 
@@ -454,10 +454,180 @@ before the next chunk is read.
 Duplicate policy: identical OHLCV rows count as duplicates; conflicting OHLCV
 values become rejections (never silent overwrite). Trade dedupe prefers
 exchange trade ID, then sequence number, then a SHA-256 fallback key. Empty
-readable files finalize as `SUCCESS`. Candle aggregation remains Feature 008.
+readable files finalize as `SUCCESS`. After successful tick persistence
+(`accepted_rows > 0`), Feature 008 schedules candle aggregation via
+`transaction.on_commit()`.
 
 `GET /api/v1/ingestion/{id}/rejections/` returns persisted rejected rows for the
 owner.
+
+### Feature 008: Candle aggregation and daily returns
+
+Feature 008 aggregates persisted `Trade` rows into timeframe candles and
+exposes daily simple/log returns from imported `DailyOHLCV` records.
+
+Trade-derived candles are stored in `Candle` and remain separate from imported
+`DailyOHLCV`. Aggregation never overwrites `DailyOHLCV`. Daily analytics use
+`DailyOHLCV`; the candle API may also expose trade-derived `1d` candles and
+labels them with `"source": "trade_derived_candle"`.
+
+Supported timeframes: `1m`, `5m`, `15m`, `30m`, `1h`, `1d`.
+
+- Intraday buckets use fixed UTC intervals.
+- Daily buckets use midnight-to-midnight in `Exchange.timezone` (local calendar
+  day, not exchange session hours).
+- Empty intervals are omitted.
+- Candle volume is a Decimal sum of `Trade.quantity`.
+- Same-timestamp open/close ordering: `event_timestamp`, non-null
+  `sequence_number` first, then `sequence_number`, then trade `id`.
+- Aggregation recomputes affected buckets from trades (idempotent; late trades
+  update existing candles and bump `aggregation_version`).
+
+Analytics routes are mounted under `/api/v1/analytics/` and require JWT
+authentication.
+
+| Method | Endpoint | Purpose |
+| ------ | -------- | ------- |
+| GET | `/api/v1/analytics/candles/` | List persisted trade-derived candles. |
+| GET | `/api/v1/analytics/returns/` | Daily simple or log returns from `DailyOHLCV`. |
+| POST | `/api/v1/analytics/aggregations/` | Request async candle aggregation (`202`). |
+| GET | `/api/v1/analytics/aggregations/{run_id}/` | Read aggregation run status. |
+
+Common filters (where applicable): `instrument_id`, or natural keys
+`instrument_symbol` / `instrument_name` (optionally with `exchange_code` /
+`exchange_id` when the name or symbol is ambiguous), `portfolio_id` (ownership
+enforced), `timeframe`, date/time range. Do not send `instrument_id` together
+with symbol/name. Returns also accept `return_type=simple|log` (default
+`simple`).
+
+```http
+GET /api/v1/analytics/returns/?instrument_name=Acme%20Industrial&exchange_code=XNYS&start_date=2024-01-01&end_date=2024-12-31&return_type=simple
+GET /api/v1/analytics/returns/?instrument_symbol=ACME&exchange_code=XNYS&return_type=log
+```
+
+Candle and aggregation collection/detail responses use the standard success
+envelope. The returns endpoint returns the same envelope via Django
+`JsonResponse`. Pagination for candles nests `count` / `next` / `previous` /
+`results` inside `data`.
+
+#### Manual aggregation (`POST /api/v1/analytics/aggregations/`)
+
+Identify the instrument with **one of** `instrument_id`, `instrument_symbol`,
+or `instrument_name`, plus `exchange_code` or `exchange_id`. Do not put a name
+into `instrument_id` (that field is an integer only).
+
+Supported `timeframes` values: `1m`, `5m`, `15m`, `30m`, `1h`, `1d`. Omit
+`timeframes` to aggregate all of them. Response is `202 Accepted` with a
+persisted `AggregationRun` id. Poll `GET /api/v1/analytics/aggregations/{run_id}/`.
+
+By name, one-minute candles only:
+
+```json
+{
+  "instrument_name": "Glaxo Robotics",
+  "exchange_code": "XNYS",
+  "timeframes": ["1m"],
+  "range_start": "2024-01-01T00:00:00Z",
+  "range_end": "2024-01-03T00:00:00Z"
+}
+```
+
+By symbol, five-minute candles:
+
+```json
+{
+  "instrument_symbol": "ACME",
+  "exchange_code": "XNYS",
+  "timeframes": ["5m"],
+  "range_start": "2024-01-01T00:00:00Z",
+  "range_end": "2024-01-03T00:00:00Z"
+}
+```
+
+Intraday mix (`15m` + `30m` + `1h`):
+
+```json
+{
+  "instrument_name": "Glaxo Robotics",
+  "exchange_code": "XNYS",
+  "timeframes": ["15m", "30m", "1h"],
+  "range_start": "2024-01-01T00:00:00Z",
+  "range_end": "2024-01-03T00:00:00Z"
+}
+```
+
+Daily candles only:
+
+```json
+{
+  "instrument_symbol": "ACME",
+  "exchange_code": "XNYS",
+  "timeframes": ["1d"],
+  "range_start": "2024-01-01T00:00:00Z",
+  "range_end": "2024-01-10T00:00:00Z"
+}
+```
+
+All supported timeframes (omit the field, or send the full list):
+
+```json
+{
+  "instrument_name": "Glaxo Robotics",
+  "exchange_code": "XNYS",
+  "timeframes": ["1m", "5m", "15m", "30m", "1h", "1d"],
+  "range_start": "2024-01-01T00:00:00Z",
+  "range_end": "2024-01-03T00:00:00Z"
+}
+```
+
+Dispatch failures are stored as `dispatch_failed` and are retryable. Manual runs
+audit the requesting user; ingestion-triggered runs use system attribution.
+
+#### Candles and returns by name
+
+```http
+GET /api/v1/analytics/candles/?instrument_name=Glaxo%20Robotics&exchange_code=XNYS&timeframe=1m
+GET /api/v1/analytics/returns/?instrument_name=Glaxo%20Robotics&exchange_code=XNYS&start_date=2024-01-01&end_date=2024-12-31&return_type=simple
+```
+
+Returns payloads include metric metadata, instrument/exchange identifiers,
+lookback requirements, and dated `value` observations (`null` until a prior
+valid close exists). Redis caching for analytics is deferred.
+
+How to exercise the APIs locally (Docker web on port 8000):
+
+```bash
+docker compose exec web python manage.py migrate
+
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login/ \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"YOUR_USER","password":"YOUR_PASSWORD"}' \
+  | python -c 'import sys,json; print(json.load(sys.stdin)["data"]["access"])')
+
+curl -s -X POST http://127.0.0.1:8000/api/v1/analytics/aggregations/ \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "instrument_name": "Glaxo Robotics",
+    "exchange_code": "XNYS",
+    "timeframes": ["1m", "1d"],
+    "range_start": "2024-01-01T00:00:00Z",
+    "range_end": "2024-01-03T00:00:00Z"
+  }' | python -m json.tool
+
+# then poll with the returned id:
+# curl -s "http://127.0.0.1:8000/api/v1/analytics/aggregations/<run_id>/" \
+#   -H "Authorization: Bearer $TOKEN" | python -m json.tool
+
+curl -s "http://127.0.0.1:8000/api/v1/analytics/candles/?instrument_name=Glaxo%20Robotics&exchange_code=XNYS&timeframe=1m" \
+  -H "Authorization: Bearer $TOKEN" | python -m json.tool
+```
+
+Automated tests:
+
+```bash
+python -m pytest apps/analytics/tests/ -q
+```
 
 ### Feature 005: User file management and ingestion dispatch
 
@@ -804,7 +974,9 @@ not required for that resolution.
 .
 ├── apps/
 │   ├── accounts/          # Custom user model
-│   ├── analytics/         # Reserved for a later analytics feature
+│   ├── analytics/         # Candle aggregation runs, returns API, metrics helpers
+│   │   ├── services/      # Aggregation, dispatch, metrics_calculator
+│   │   └── tasks.py       # process_aggregation_run Celery task
 │   ├── audit/             # Append-only user and system audit records
 │   ├── common/            # Health, logging and middleware
 │   ├── exchanges/         # Exchange master data
@@ -814,7 +986,7 @@ not required for that resolution.
 │   │   ├── pipeline.py    # run_conversion_pipeline orchestration
 │   │   └── staging.py     # Staging dirs, manifest, retention cleanup
 │   ├── instruments/       # Instrument master data
-│   ├── market_data/       # Daily OHLCV and generator catalogs
+│   ├── market_data/       # DailyOHLCV, Trade, and trade-derived Candle models
 │   └── portfolios/        # User-owned portfolios and instrument configuration
 ├── config/
 │   ├── settings/          # base, development, production, test

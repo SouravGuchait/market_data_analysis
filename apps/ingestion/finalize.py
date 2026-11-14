@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from apps.audit.models import AuditAction, AuditResourceType, AuditStatus
 from apps.audit.services import record_audit_event, record_system_event
-from apps.ingestion.models import Ingestion, IngestionState
+from apps.ingestion.models import DataType, Ingestion, IngestionState
 from apps.ingestion.services import _record_transition
 from apps.ingestion.staging import release_successful_files
 
@@ -67,6 +67,20 @@ def resolve_final_state(ingestion: Ingestion) -> str:
     return IngestionState.SUCCESS
 
 
+def _maybe_schedule_aggregation(ingestion: Ingestion) -> None:
+    """Enqueue Feature 008 candle aggregation after accepted tick persistence."""
+
+    if ingestion.data_type != DataType.TICK_DATA:
+        return
+    if ingestion.accepted_rows <= 0:
+        return
+    if ingestion.state not in {IngestionState.SUCCESS, IngestionState.PARTIAL_SUCCESS}:
+        return
+    from apps.analytics.services.dispatch import schedule_ingestion_aggregation
+
+    schedule_ingestion_aggregation(ingestion.pk)
+
+
 def finalize_ingestion(ingestion: Ingestion) -> Ingestion:
     """Set terminal status from counters and emit completion audit."""
 
@@ -112,6 +126,7 @@ def finalize_ingestion(ingestion: Ingestion) -> Ingestion:
         },
     )
     release_successful_files(ingestion)
+    _maybe_schedule_aggregation(ingestion)
     return ingestion
 
 
