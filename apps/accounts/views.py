@@ -301,12 +301,16 @@ class PasswordResetConfirmView(views.APIView):
 
         rejected = _password_reset_record_rejection(reset_record, new_password)
         if reset_record is None or rejected is not None:
-            return rejected if rejected is not None else JsonResponse(
-                {
-                    "success": False,
-                    "message": "Invalid, consumed, or expired signature token mapping.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+            return (
+                rejected
+                if rejected is not None
+                else JsonResponse(
+                    {
+                        "success": False,
+                        "message": "Invalid, consumed, or expired signature token mapping.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             )
 
         # Execute updates safely

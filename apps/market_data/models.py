@@ -1,10 +1,13 @@
-"""Daily market data models."""
+"""Daily market data and tick trade models."""
 
 from __future__ import annotations
+
+import uuid
 
 from django.db import models
 from django.db.models import F, Q
 
+from apps.exchanges.models import Exchange
 from apps.instruments.models import Instrument
 
 
@@ -106,3 +109,56 @@ class DailyOHLCV(models.Model):
 
     def __str__(self) -> str:
         return f"{self.instrument.symbol} - {self.trading_date}"
+
+
+class Trade(models.Model):
+    """One tick-level trade event persisted from tick ingestion."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    instrument = models.ForeignKey(Instrument, on_delete=models.CASCADE, related_name="trades")
+    exchange = models.ForeignKey(Exchange, on_delete=models.PROTECT, related_name="trades")
+    event_timestamp = models.DateTimeField()
+    price = models.DecimalField(max_digits=20, decimal_places=6)
+    quantity = models.DecimalField(max_digits=20, decimal_places=8)
+    exchange_trade_id = models.CharField(max_length=128, blank=True, default="")
+    sequence_number = models.BigIntegerField(null=True, blank=True)
+    side = models.CharField(max_length=16, blank=True, default="")
+    ingestion = models.ForeignKey(
+        "ingestion.Ingestion",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="trades",
+    )
+    source_file_reference = models.CharField(max_length=512, blank=True, default="")
+    ingestion_timestamp = models.DateTimeField()
+    deduplication_key = models.CharField(max_length=64)
+    source_metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "mda_trades"
+        ordering = ["event_timestamp", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["exchange", "instrument", "deduplication_key"],
+                name="unique_trade_exchange_instrument_dedupe",
+            ),
+            models.CheckConstraint(condition=Q(price__gt=0), name="trade_price_positive"),
+            models.CheckConstraint(condition=Q(quantity__gt=0), name="trade_quantity_positive"),
+        ]
+        indexes = [
+            models.Index(
+                fields=["instrument", "event_timestamp"],
+                name="idx_trade_instrument_time",
+            ),
+            models.Index(
+                fields=["exchange", "event_timestamp"],
+                name="idx_trade_exchange_time",
+            ),
+            models.Index(fields=["ingestion"], name="idx_trade_ingestion"),
+            models.Index(fields=["deduplication_key"], name="idx_trade_dedupe_key"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.instrument.symbol}@{self.event_timestamp}"

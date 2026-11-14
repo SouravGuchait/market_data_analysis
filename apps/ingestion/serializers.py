@@ -17,6 +17,7 @@ from .models import (
     IngestionRule,
     IngestionScan,
     IngestionState,
+    RejectedRow,
     StorageBackend,
     StorageFile,
     _safe_storage_prefix,
@@ -111,6 +112,21 @@ class IngestionReadSerializer(serializers.ModelSerializer):
             "completed_at",
             "created_at",
             "updated_at",
+        )
+        read_only_fields = fields
+
+
+class RejectedRowReadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RejectedRow
+        fields = (
+            "id",
+            "source_row_number",
+            "reason_code",
+            "field_name",
+            "error_message",
+            "raw_record",
+            "rejected_at",
         )
         read_only_fields = fields
 

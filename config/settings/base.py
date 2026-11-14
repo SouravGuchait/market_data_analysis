@@ -225,6 +225,15 @@ INGESTION_STAGING_RETENTION_FAILED_SECONDS = max(
 INGESTION_STAGING_CLEANUP_INTERVAL_SECONDS = max(
     60, env_int("INGESTION_STAGING_CLEANUP_INTERVAL_SECONDS", 3600)
 )
+INGESTION_REJECTED_RAW_MAX_BYTES = max(64, env_int("INGESTION_REJECTED_RAW_MAX_BYTES", 2048))
+INGESTION_TASK_MAX_RETRIES = max(0, env_int("INGESTION_TASK_MAX_RETRIES", 5))
+INGESTION_TASK_SOFT_TIME_LIMIT_SECONDS = max(
+    30, env_int("INGESTION_TASK_SOFT_TIME_LIMIT_SECONDS", 1800)
+)
+INGESTION_TASK_TIME_LIMIT_SECONDS = max(
+    INGESTION_TASK_SOFT_TIME_LIMIT_SECONDS + 30,
+    env_int("INGESTION_TASK_TIME_LIMIT_SECONDS", 2100),
+)
 INGESTION_S3_BUCKET = os.getenv("INGESTION_S3_BUCKET", "").strip()
 INGESTION_S3_PREFIX = os.getenv("INGESTION_S3_PREFIX", "").strip().strip("/")
 INGESTION_S3_REGION = os.getenv("INGESTION_S3_REGION", "").strip()
@@ -314,6 +323,16 @@ CELERY_BEAT_SCHEDULE = {
 # Keep Django's console + rotating-file handlers for worker and beat output
 # instead of letting Celery replace the root logger configuration.
 CELERY_WORKER_HIJACK_ROOT_LOGGER = False
+CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+CELERY_TASK_ANNOTATIONS = {
+    "apps.ingestion.tasks.process_ingestion_file": {
+        "max_retries": INGESTION_TASK_MAX_RETRIES,
+        "soft_time_limit": INGESTION_TASK_SOFT_TIME_LIMIT_SECONDS,
+        "time_limit": INGESTION_TASK_TIME_LIMIT_SECONDS,
+    }
+}
 
 # ---------------------------------------------------------------------------
 # Logging

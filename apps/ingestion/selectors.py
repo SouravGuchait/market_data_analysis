@@ -9,7 +9,7 @@ from datetime import datetime
 from django.contrib.auth.models import User
 from django.db.models import QuerySet
 
-from .models import Ingestion, IngestionRule, StorageFile
+from .models import Ingestion, IngestionRule, RejectedRow, StorageFile
 
 
 def list_storage_files(owner: User) -> QuerySet[StorageFile]:
@@ -30,6 +30,13 @@ def list_owned_ingestions(owner: User) -> QuerySet[Ingestion]:
 
 def get_owned_ingestion(owner: User, ingestion_id: uuid.UUID) -> Ingestion | None:
     return list_owned_ingestions(owner).filter(pk=ingestion_id).first()
+
+
+def list_owned_rejections(owner: User, ingestion_id: uuid.UUID) -> QuerySet[RejectedRow]:
+    return RejectedRow.objects.filter(
+        ingestion_id=ingestion_id,
+        ingestion__owner=owner,
+    ).select_related("ingestion")
 
 
 def filter_owned_ingestions(
