@@ -1,4 +1,4 @@
-# Market Data Analytics
+# Market Data & Trade Analytics
 
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
@@ -1140,22 +1140,3 @@ python manage.py check
 - The ingestion root is configured server-side; no API accepts arbitrary paths.
 - The readiness endpoint is intentionally public so orchestrators can probe it;
   business APIs use DRF authentication and permission defaults.
-
-## Out of scope for Feature 001
-
-- Registration, login, JWT issuance and password reset.
-- File discovery, parsing, tick ingestion and candle aggregation workflows.
-- Portfolio, analytics and audit APIs.
-- Streamlit frontend.
-- AWS ECR/ECS deployment.
-- The separate AI/FastAPI service described in later roadmap features.
-
-## Feature 001 implementation record
-
-The foundation currently contains the custom user model, exchange and
-instrument master data, environment-based Django settings, the health and
-OpenAPI endpoints, request correlation and redacted structured logging, and
-Docker/Celery runtime configuration. Unused tick, candle and ingestion models,
-unused database indexes, and dependencies used only by deferred features have
-been removed. Required future app packages remain as minimal placeholders; add
-models, services and dependencies alongside the feature that first uses them.

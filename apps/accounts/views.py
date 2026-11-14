@@ -158,7 +158,16 @@ class CurrentUserView(views.APIView):
     throttle_scope = "user_profile"
 
     def get(self, request):
-        return self.request.user
+        serializer = self.serializer_class(request.user)
+        return JsonResponse(
+            {
+                "success": True,
+                "message": "Current user profile",
+                "data": serializer.data,
+                "errors": None,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class PasswordResetRequestView(views.APIView):

@@ -10,15 +10,13 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import User
 from django.core import mail
-from django.http import HttpRequest
 from django.test import override_settings
 from django.utils import timezone
-from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
+from rest_framework.test import APIClient
 from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.accounts.models import PasswordResetToken
-from apps.accounts.views import CurrentUserView
 
 AUTH_URL = "/api/v1/auth/"
 STRONG_PASSWORD = "Violet!River_Orbit-Glass_9274"
@@ -258,14 +256,20 @@ def test_current_user_rejects_anonymous_request(api_client):
 
 
 @pytest.mark.django_db
-def test_current_user_get_is_not_supported(account_user):
-    view = CurrentUserView()
-    raw_request = APIRequestFactory().get(f"{AUTH_URL}me/")
-    force_authenticate(raw_request, user=account_user)
-    request = view.initialize_request(raw_request)
-    view.request = cast(HttpRequest, request)
+def test_current_user_returns_authenticated_profile(api_client, account_user):
+    authenticate(api_client, account_user)
 
-    assert view.get(request) is account_user
+    response = api_client.get(f"{AUTH_URL}me/")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["errors"] is None
+    assert payload["data"] == {
+        "id": account_user.pk,
+        "username": account_user.username,
+        "email": account_user.email,
+    }
 
 
 @pytest.mark.django_db
