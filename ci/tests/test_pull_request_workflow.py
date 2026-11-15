@@ -6,7 +6,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-REQUIRED_JOBS = ("quality", "security", "django", "tests", "streamlit", "docker")
+REQUIRED_JOBS = (
+    "quality",
+    "security",
+    "django",
+    "tests",
+    "streamlit",
+    "integration",
+    "docker",
+)
 FORBIDDEN = (
     "aws-actions/configure-aws-credentials",
     "amazon-ecr",
