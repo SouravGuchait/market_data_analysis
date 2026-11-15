@@ -8,12 +8,19 @@ from rest_framework import serializers
 
 from apps.analytics.models import AggregationRun
 from apps.analytics.services.metrics_calculator import (
+    DEFAULT_ATR_WINDOW,
+    DEFAULT_BOLLINGER_MULTIPLIER,
+    DEFAULT_RSI_WINDOW,
+    DEFAULT_STOCHASTIC_SIGNAL,
+    DEFAULT_STOCHASTIC_WINDOW,
     DEFAULT_WINDOW,
     MACD_DEFAULT_FAST,
     MACD_DEFAULT_SIGNAL,
     MACD_DEFAULT_SLOW,
+    MAX_BOLLINGER_MULTIPLIER,
     MAX_INDICATOR_PERIOD,
     MAX_INDICATOR_RANGE_DAYS,
+    MIN_BOLLINGER_MULTIPLIER,
     MIN_INDICATOR_PERIOD,
 )
 from apps.analytics.services.timeframes import SUPPORTED_TIMEFRAMES
@@ -110,6 +117,38 @@ class CandleFilterSerializer(serializers.Serializer):
         return attrs
 
 
+def _validate_daily_metric_scope(attrs: dict[str, object]) -> dict[str, object]:
+    _reject_dual_exchange(attrs)
+    _reject_dual_instrument(attrs)
+    start_date = attrs.get("start_date")
+    end_date = attrs.get("end_date")
+    if isinstance(start_date, date) and isinstance(end_date, date) and end_date < start_date:
+        raise serializers.ValidationError(
+            {"end_date": ["end_date must be on or after start_date."]}
+        )
+    has_scope = any(
+        attrs.get(key) is not None
+        for key in (
+            "instrument_id",
+            "instrument_symbol",
+            "instrument_name",
+            "portfolio_id",
+            "exchange_id",
+            "exchange_code",
+        )
+    )
+    if not has_scope:
+        raise serializers.ValidationError(
+            {
+                "detail": [
+                    "Provide instrument_id, instrument_symbol, instrument_name, "
+                    "portfolio_id, or an exchange filter."
+                ]
+            }
+        )
+    return attrs
+
+
 class ReturnsFilterSerializer(serializers.Serializer):
     instrument_id = serializers.IntegerField(required=False, min_value=1)
     instrument_symbol = serializers.CharField(required=False, allow_blank=False)
@@ -126,35 +165,23 @@ class ReturnsFilterSerializer(serializers.Serializer):
     )
 
     def validate(self, attrs: dict[str, object]) -> dict[str, object]:
-        _reject_dual_exchange(attrs)
-        _reject_dual_instrument(attrs)
-        start_date = attrs.get("start_date")
-        end_date = attrs.get("end_date")
-        if isinstance(start_date, date) and isinstance(end_date, date) and end_date < start_date:
-            raise serializers.ValidationError(
-                {"end_date": ["end_date must be on or after start_date."]}
-            )
-        has_scope = any(
-            attrs.get(key) is not None
-            for key in (
-                "instrument_id",
-                "instrument_symbol",
-                "instrument_name",
-                "portfolio_id",
-                "exchange_id",
-                "exchange_code",
-            )
-        )
-        if not has_scope:
-            raise serializers.ValidationError(
-                {
-                    "detail": [
-                        "Provide instrument_id, instrument_symbol, instrument_name, "
-                        "portfolio_id, or an exchange filter."
-                    ]
-                }
-            )
-        return attrs
+        return _validate_daily_metric_scope(attrs)
+
+
+class DrawdownFilterSerializer(serializers.Serializer):
+    """Query contract for running and maximum drawdown from DailyOHLCV closes."""
+
+    instrument_id = serializers.IntegerField(required=False, min_value=1)
+    instrument_symbol = serializers.CharField(required=False, allow_blank=False)
+    instrument_name = serializers.CharField(required=False, allow_blank=False)
+    exchange_id = serializers.IntegerField(required=False, min_value=1)
+    exchange_code = serializers.CharField(required=False, allow_blank=False)
+    portfolio_id = serializers.UUIDField(required=False)
+    start_date = serializers.DateField(required=False)
+    end_date = serializers.DateField(required=False)
+
+    def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        return _validate_daily_metric_scope(attrs)
 
 
 def _require_analytics_scope(attrs: dict[str, object]) -> None:
@@ -256,6 +283,62 @@ class MacdIndicatorFilterSerializer(_IndicatorScopeSerializer):
                 {"fast_period": ["fast_period must be less than slow_period."]}
             )
         return attrs
+
+
+class BollingerIndicatorFilterSerializer(_IndicatorScopeSerializer):
+    """Query contract for Bollinger Bands on trade-derived candle closes."""
+
+    window = serializers.IntegerField(
+        required=False,
+        default=DEFAULT_WINDOW,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+    std_multiplier = serializers.FloatField(
+        required=False,
+        default=DEFAULT_BOLLINGER_MULTIPLIER,
+        min_value=MIN_BOLLINGER_MULTIPLIER,
+        max_value=MAX_BOLLINGER_MULTIPLIER,
+    )
+
+
+class AtrIndicatorFilterSerializer(_IndicatorScopeSerializer):
+    """Query contract for ATR. Default window is the documented period 14."""
+
+    window = serializers.IntegerField(
+        required=False,
+        default=DEFAULT_ATR_WINDOW,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+
+
+class RsiIndicatorFilterSerializer(_IndicatorScopeSerializer):
+    """Query contract for RSI. Default window is the documented period 14."""
+
+    window = serializers.IntegerField(
+        required=False,
+        default=DEFAULT_RSI_WINDOW,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+
+
+class StochasticIndicatorFilterSerializer(_IndicatorScopeSerializer):
+    """Query contract for Stochastic %K/%D on trade-derived candles."""
+
+    window = serializers.IntegerField(
+        required=False,
+        default=DEFAULT_STOCHASTIC_WINDOW,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+    signal_period = serializers.IntegerField(
+        required=False,
+        default=DEFAULT_STOCHASTIC_SIGNAL,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
 
 
 class AggregationCreateSerializer(serializers.Serializer):

@@ -1,4 +1,4 @@
-"""HTTP endpoints for candles, daily returns, trend indicators, and aggregation runs."""
+"""HTTP endpoints for candles, returns, trend/volatility indicators, and aggregation."""
 
 from __future__ import annotations
 
@@ -29,10 +29,15 @@ from apps.analytics.selectors import (
 from apps.analytics.serializers import (
     AggregationCreateSerializer,
     AggregationRunSerializer,
+    AtrIndicatorFilterSerializer,
+    BollingerIndicatorFilterSerializer,
     CandleFilterSerializer,
     CandleReadSerializer,
+    DrawdownFilterSerializer,
     MacdIndicatorFilterSerializer,
     ReturnsFilterSerializer,
+    RsiIndicatorFilterSerializer,
+    StochasticIndicatorFilterSerializer,
     WindowIndicatorFilterSerializer,
 )
 from apps.analytics.services.dispatch import (
@@ -41,9 +46,20 @@ from apps.analytics.services.dispatch import (
     schedule_run_on_commit,
 )
 from apps.analytics.services.metrics_calculator import (
+    AtrSeries,
+    BollingerSeries,
     IndicatorSeries,
     MacdSeries,
+    RsiSeries,
+    StochasticSeries,
+    build_drawdown_series,
     build_returns_series,
+)
+from apps.analytics.services.momentum import (
+    RsiIndicatorQuery,
+    StochasticIndicatorQuery,
+    build_rsi_series,
+    build_stochastic_series,
 )
 from apps.analytics.services.trend import (
     IndicatorLimitError,
@@ -52,6 +68,12 @@ from apps.analytics.services.trend import (
     build_ema_series,
     build_macd_series,
     build_sma_series,
+)
+from apps.analytics.services.volatility import (
+    AtrIndicatorQuery,
+    BollingerIndicatorQuery,
+    build_atr_series,
+    build_bollinger_series,
 )
 from apps.common.pagination import StandardResultsPagination
 from apps.exchanges.models import Exchange
@@ -184,6 +206,38 @@ class ReturnsListView(APIView):
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
         return _returns_from_scope(request, _mapping(filters.validated_data))
+
+
+def _drawdown_from_scope(request: Request, data: dict[str, object]) -> Response:
+    instrument_ids, _exchange_ids, error = resolve_scope(_user(request), data)
+    if error is not None:
+        return error
+    start_date = _optional_date(data.get("start_date"))
+    end_date = _optional_date(data.get("end_date"))
+    series = build_drawdown_series(
+        list(
+            list_daily_ohlcv(
+                instrument_ids=instrument_ids or [], start_date=start_date, end_date=end_date
+            )
+        ),
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return success("Drawdown retrieved", {"count": len(series), "results": series})
+
+
+class DrawdownListView(APIView):
+    """Running and period maximum drawdown from DailyOHLCV. Ordinary GETs are not audit events."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[DrawdownFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> Response:
+        filters = DrawdownFilterSerializer(data=request.query_params)
+        if not filters.is_valid():
+            return failure("Invalid drawdown filters", filters.errors)
+        return _drawdown_from_scope(request, _mapping(filters.validated_data))
 
 
 @dataclass(frozen=True)
@@ -368,6 +422,235 @@ class MacdListView(APIView):
     @extend_schema(parameters=[MacdIndicatorFilterSerializer], tags=["analytics"])
     def get(self, request: Request) -> Response:
         return macd_indicator_response(request)
+
+
+def _float_field(data: dict[str, object], key: str) -> float | None:
+    value = data.get(key)
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _bollinger_query(data: dict[str, object], scope: _Scope) -> BollingerIndicatorQuery | None:
+    timeframe = _text_field(data, "timeframe")
+    window = _int_field(data, "window")
+    multiplier = _float_field(data, "std_multiplier")
+    if timeframe is None or window is None or multiplier is None:
+        return None
+    return BollingerIndicatorQuery(
+        candles=_candle_query(data, scope, timeframe),
+        window=window,
+        std_multiplier=multiplier,
+    )
+
+
+def _bollinger_outcome(
+    data: dict[str, object],
+    scope: _Scope,
+) -> Response | tuple[BollingerIndicatorQuery, list[BollingerSeries]]:
+    query = _bollinger_query(data, scope)
+    if query is None:
+        return failure("Invalid bollinger filters", {"detail": ["Invalid indicator parameters."]})
+    outcome = build_bollinger_series(query)
+    if isinstance(outcome, IndicatorLimitError):
+        return failure(outcome.message, outcome.errors)
+    return query, outcome
+
+
+def _prepare_bollinger(
+    request: Request,
+) -> Response | tuple[BollingerIndicatorQuery, list[BollingerSeries]]:
+    filters = BollingerIndicatorFilterSerializer(data=request.query_params)
+    if not filters.is_valid():
+        return failure("Invalid bollinger filters", filters.errors)
+    data = _mapping(filters.validated_data)
+    scope = _scoped_ids(request, data)
+    if isinstance(scope, Response):
+        return scope
+    return _bollinger_outcome(data, scope)
+
+
+def bollinger_indicator_response(request: Request) -> Response:
+    prepared = _prepare_bollinger(request)
+    if isinstance(prepared, Response):
+        return prepared
+    query, outcome = prepared
+    _log_indicator(request, "bollinger", query.candles.timeframe, len(outcome))
+    return success("Bollinger Bands retrieved", {"count": len(outcome), "results": outcome})
+
+
+def _atr_query(data: dict[str, object], scope: _Scope) -> AtrIndicatorQuery | None:
+    timeframe = _text_field(data, "timeframe")
+    window = _int_field(data, "window")
+    if timeframe is None or window is None:
+        return None
+    return AtrIndicatorQuery(candles=_candle_query(data, scope, timeframe), window=window)
+
+
+def _atr_outcome(
+    data: dict[str, object],
+    scope: _Scope,
+) -> Response | tuple[AtrIndicatorQuery, list[AtrSeries]]:
+    query = _atr_query(data, scope)
+    if query is None:
+        return failure("Invalid atr filters", {"detail": ["Invalid indicator parameters."]})
+    outcome = build_atr_series(query)
+    if isinstance(outcome, IndicatorLimitError):
+        return failure(outcome.message, outcome.errors)
+    return query, outcome
+
+
+def _prepare_atr(request: Request) -> Response | tuple[AtrIndicatorQuery, list[AtrSeries]]:
+    filters = AtrIndicatorFilterSerializer(data=request.query_params)
+    if not filters.is_valid():
+        return failure("Invalid atr filters", filters.errors)
+    data = _mapping(filters.validated_data)
+    scope = _scoped_ids(request, data)
+    if isinstance(scope, Response):
+        return scope
+    return _atr_outcome(data, scope)
+
+
+def atr_indicator_response(request: Request) -> Response:
+    prepared = _prepare_atr(request)
+    if isinstance(prepared, Response):
+        return prepared
+    query, outcome = prepared
+    _log_indicator(request, "atr", query.candles.timeframe, len(outcome))
+    return success("ATR retrieved", {"count": len(outcome), "results": outcome})
+
+
+class BollingerListView(APIView):
+    """Bollinger Bands from trade-derived candle closes. Ordinary GETs are not audit events."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[BollingerIndicatorFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> Response:
+        return bollinger_indicator_response(request)
+
+
+class AtrListView(APIView):
+    """Average True Range from trade-derived candle OHLC. Ordinary GETs are not audit events."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[AtrIndicatorFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> Response:
+        return atr_indicator_response(request)
+
+
+def _rsi_query(data: dict[str, object], scope: _Scope) -> RsiIndicatorQuery | None:
+    timeframe = _text_field(data, "timeframe")
+    window = _int_field(data, "window")
+    if timeframe is None or window is None:
+        return None
+    return RsiIndicatorQuery(candles=_candle_query(data, scope, timeframe), window=window)
+
+
+def _rsi_outcome(
+    data: dict[str, object],
+    scope: _Scope,
+) -> Response | tuple[RsiIndicatorQuery, list[RsiSeries]]:
+    query = _rsi_query(data, scope)
+    if query is None:
+        return failure("Invalid rsi filters", {"detail": ["Invalid indicator parameters."]})
+    outcome = build_rsi_series(query)
+    if isinstance(outcome, IndicatorLimitError):
+        return failure(outcome.message, outcome.errors)
+    return query, outcome
+
+
+def _prepare_rsi(request: Request) -> Response | tuple[RsiIndicatorQuery, list[RsiSeries]]:
+    filters = RsiIndicatorFilterSerializer(data=request.query_params)
+    if not filters.is_valid():
+        return failure("Invalid rsi filters", filters.errors)
+    data = _mapping(filters.validated_data)
+    scope = _scoped_ids(request, data)
+    if isinstance(scope, Response):
+        return scope
+    return _rsi_outcome(data, scope)
+
+
+def rsi_indicator_response(request: Request) -> Response:
+    prepared = _prepare_rsi(request)
+    if isinstance(prepared, Response):
+        return prepared
+    query, outcome = prepared
+    _log_indicator(request, "rsi", query.candles.timeframe, len(outcome))
+    return success("RSI retrieved", {"count": len(outcome), "results": outcome})
+
+
+def _stochastic_query(data: dict[str, object], scope: _Scope) -> StochasticIndicatorQuery | None:
+    timeframe = _text_field(data, "timeframe")
+    window = _int_field(data, "window")
+    signal = _int_field(data, "signal_period")
+    if timeframe is None or window is None or signal is None:
+        return None
+    return StochasticIndicatorQuery(
+        candles=_candle_query(data, scope, timeframe),
+        window=window,
+        signal_period=signal,
+    )
+
+
+def _stochastic_outcome(
+    data: dict[str, object],
+    scope: _Scope,
+) -> Response | tuple[StochasticIndicatorQuery, list[StochasticSeries]]:
+    query = _stochastic_query(data, scope)
+    if query is None:
+        return failure("Invalid stochastic filters", {"detail": ["Invalid indicator parameters."]})
+    outcome = build_stochastic_series(query)
+    if isinstance(outcome, IndicatorLimitError):
+        return failure(outcome.message, outcome.errors)
+    return query, outcome
+
+
+def _prepare_stochastic(
+    request: Request,
+) -> Response | tuple[StochasticIndicatorQuery, list[StochasticSeries]]:
+    filters = StochasticIndicatorFilterSerializer(data=request.query_params)
+    if not filters.is_valid():
+        return failure("Invalid stochastic filters", filters.errors)
+    data = _mapping(filters.validated_data)
+    scope = _scoped_ids(request, data)
+    if isinstance(scope, Response):
+        return scope
+    return _stochastic_outcome(data, scope)
+
+
+def stochastic_indicator_response(request: Request) -> Response:
+    prepared = _prepare_stochastic(request)
+    if isinstance(prepared, Response):
+        return prepared
+    query, outcome = prepared
+    _log_indicator(request, "stochastic", query.candles.timeframe, len(outcome))
+    return success("Stochastic retrieved", {"count": len(outcome), "results": outcome})
+
+
+class RsiListView(APIView):
+    """RSI from trade-derived candle closes. Ordinary GETs are not audit events."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[RsiIndicatorFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> Response:
+        return rsi_indicator_response(request)
+
+
+class StochasticListView(APIView):
+    """Stochastic %K/%D from trade-derived candles. Ordinary GETs are not audit events."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[StochasticIndicatorFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> Response:
+        return stochastic_indicator_response(request)
 
 
 def _as_optional_int(value: object) -> int | None:
