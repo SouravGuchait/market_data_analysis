@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), and **SMA, EMA, and MACD** (Feature 009). Volatility, momentum, volume, price-action, and statistical indicators remain future work (Features 010+).
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), **SMA, EMA, and MACD** (Feature 009), **Bollinger Bands and ATR** (Feature 010), **RSI and Stochastic** (Feature 011), and **maximum drawdown** (Feature 020). Volume, price-action, and statistical indicators remain future work (Features 012–014).
 
 ## Implemented features
 
@@ -670,6 +670,70 @@ decimals. These GET requests are not audit events.
 GET /api/v1/analytics/sma/?instrument_symbol=ACME&exchange_code=XNYS&timeframe=1d&window=20
 GET /api/v1/analytics/ema/?instrument_name=Acme%20Industrial&exchange_code=XNYS&timeframe=1h&window=12
 GET /api/v1/analytics/macd/?instrument_symbol=ACME&exchange_code=XNYS&timeframe=1d
+```
+
+### Feature 010: Volatility indicators (Bollinger Bands, ATR)
+
+Feature 010 calculates Bollinger Bands and ATR from trade-derived `Candle` rows
+(including `1d`), compute-on-read like Feature 009. Population standard deviation
+(`ddof=0`) is used for Bollinger bands. ATR seeds as the mean of the first window
+true ranges (first bar uses high−low when no previous close exists), then Wilder
+smooths. Ordinary GETs are not audit events.
+
+| Method | Endpoint | Purpose |
+| ------ | -------- | ------- |
+| GET | `/api/v1/analytics/bollinger/` | Middle, upper, lower, and width. |
+| GET | `/api/v1/analytics/atr/` | Average True Range in price units. |
+
+Shared scope filters and limits match Feature 009. Bollinger accepts `window`
+(default 20) and `std_multiplier` (default 2.0, range 0.1–5.0). ATR accepts
+`window` (default 14, range 2–500). Width is null when middle is zero.
+
+```http
+GET /api/v1/analytics/bollinger/?instrument_symbol=ACME&exchange_code=XNYS&timeframe=1m&window=20&std_multiplier=2
+GET /api/v1/analytics/atr/?instrument_id=1&timeframe=1h&window=14
+```
+
+### Feature 011: Momentum indicators (RSI, Stochastic)
+
+Feature 011 calculates RSI and Stochastic from trade-derived `Candle` rows.
+RSI uses Wilder-smoothed average gain/loss with explicit zero-gain/loss handling
+(100 / 0 / 50). Stochastic `%K` uses the lookback high/low range; `%D` is an SMA
+of `%K`. A zero range yields null `%K`. Ordinary GETs are not audit events.
+
+| Method | Endpoint | Purpose |
+| ------ | -------- | ------- |
+| GET | `/api/v1/analytics/rsi/` | Relative Strength Index (0–100). |
+| GET | `/api/v1/analytics/stochastic/` | Stochastic `%K` and `%D`. |
+
+RSI `window` defaults to 14. Stochastic `window` defaults to 14 and
+`signal_period` defaults to 3. Limits and incomplete-candle policy match Feature
+009.
+
+```http
+GET /api/v1/analytics/rsi/?instrument_symbol=ACME&exchange_code=XNYS&timeframe=1d&window=14
+GET /api/v1/analytics/stochastic/?instrument_id=1&timeframe=1h&window=14&signal_period=3
+```
+
+### Feature 020: Maximum drawdown
+
+Feature 020 calculates running drawdown and period maximum drawdown from imported
+`DailyOHLCV` closes (adjusted close preferred when present). The running peak
+starts at the first valid close in the requested period; earlier history outside
+the range is not used. Drawdown is a fractional negative value (`-0.25` means
+−25%). Dividends and splits are not modelled unless adjusted closes are supplied.
+Trade-derived candles are not used. Ordinary GETs are not audit events.
+
+| Method | Endpoint | Purpose |
+| ------ | -------- | ------- |
+| GET | `/api/v1/analytics/drawdown/` | Running drawdown series and period MDD. |
+
+Scope filters match daily returns (`instrument_*`, `exchange_*`, `portfolio_id`,
+`start_date`, `end_date`). Each series includes per-date `value` / `peak` and a
+period-level `maximum_drawdown`.
+
+```http
+GET /api/v1/analytics/drawdown/?instrument_symbol=ACME&exchange_code=XNYS&start_date=2024-01-01&end_date=2024-12-31
 ```
 
 ### Feature 005: User file management and ingestion dispatch

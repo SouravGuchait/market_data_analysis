@@ -149,6 +149,15 @@ jobs:
       - name: Trend indicator tests
         run: .venv/bin/python -m pytest -q apps/analytics/tests/test_trend_indicators.py
 
+      - name: Volatility indicator tests
+        run: .venv/bin/python -m pytest -q apps/analytics/tests/test_volatility_indicators.py
+
+      - name: Momentum indicator tests
+        run: .venv/bin/python -m pytest -q apps/analytics/tests/test_momentum_indicators.py
+
+      - name: Drawdown tests
+        run: .venv/bin/python -m pytest -q apps/analytics/tests/test_drawdown.py
+
       - name: Redis and Celery tests
         run: |
           .venv/bin/python -m pytest -q \
