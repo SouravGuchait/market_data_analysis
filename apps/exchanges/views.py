@@ -9,6 +9,7 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.common.cache_service import catalog_key, get_or_build, ttl_catalog
 from apps.common.pagination import StandardResultsPagination
 from apps.exchanges.selectors import list_exchanges
 from apps.exchanges.serializers import ExchangeSerializer
@@ -35,9 +36,22 @@ class ExchangeListView(APIView):
     )
     def get(self, request: Request) -> Response:
         code = request.query_params.get("code", "")
-        paginator = StandardResultsPagination()
-        page = paginator.paginate_queryset(list_exchanges(code), request, view=self)
-        serializer = ExchangeSerializer(page, many=True)
-        return success(
-            "Exchanges retrieved", paginator.get_paginated_response(serializer.data).data
-        )
+        parts: dict[str, object] = {
+            "code": code,
+            "page": request.query_params.get("page", "1"),
+            "page_size": request.query_params.get("page_size", ""),
+        }
+        key = catalog_key("exchanges", parts)
+
+        def build() -> dict[str, object]:
+            paginator = StandardResultsPagination()
+            page = paginator.paginate_queryset(list_exchanges(code), request, view=self)
+            serializer = ExchangeSerializer(page, many=True)
+            return {
+                "success": True,
+                "message": "Exchanges retrieved",
+                "data": paginator.get_paginated_response(serializer.data).data,
+                "errors": None,
+            }
+
+        return Response(get_or_build(key, ttl_catalog(), build))

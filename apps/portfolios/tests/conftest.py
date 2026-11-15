@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from django.contrib.auth.models import User
+from django.core.cache import caches
 from rest_framework.test import APIClient
 
 from apps.exchanges.models import Exchange
@@ -11,6 +12,11 @@ from apps.instruments.models import Instrument
 from apps.portfolios.models import Portfolio
 
 TEST_PASSWORD = "Portfolio!Test-Password_9274"
+
+
+@pytest.fixture(autouse=True)
+def clear_cache() -> None:
+    caches["default"].clear()
 
 
 @pytest.fixture

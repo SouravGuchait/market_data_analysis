@@ -15,6 +15,13 @@ from rest_framework.views import APIView
 
 from apps.audit.models import AuditAction, AuditResourceType, AuditStatus
 from apps.audit.services import record_audit_event
+from apps.common.cache_service import (
+    get_or_build,
+    portfolio_detail_key,
+    portfolio_instruments_key,
+    portfolio_list_key,
+    ttl_portfolio,
+)
 from apps.exchanges.models import Exchange
 from apps.instruments.models import Instrument
 from apps.portfolios.bulk import (
@@ -94,14 +101,39 @@ class PortfolioAPIView(APIView):
         return get_user_portfolio(request.user, portfolio_id)
 
 
+def _user_id(request: Request) -> int:
+    raw = request.user.pk
+    if not isinstance(raw, int):
+        raise TypeError("Authenticated user id must be an integer.")
+    return raw
+
+
+def _page_parts(request: Request) -> dict[str, object]:
+    return {
+        "page": request.query_params.get("page", "1"),
+        "page_size": request.query_params.get("page_size", ""),
+    }
+
+
 class PortfolioListCreateView(PortfolioAPIView):
     def get(self, request: Request) -> Response:
-        queryset = list_user_portfolios(request.user)
-        paginator = PortfolioPagination()
-        page = paginator.paginate_queryset(queryset, request, view=self)
-        serializer = PortfolioReadSerializer(page, many=True)
-        paginated = paginator.get_paginated_response(serializer.data).data
-        return success("Portfolios retrieved", paginated)
+        user_id = _user_id(request)
+        key = portfolio_list_key(user_id, _page_parts(request))
+
+        def build() -> dict[str, object]:
+            queryset = list_user_portfolios(request.user)
+            paginator = PortfolioPagination()
+            page = paginator.paginate_queryset(queryset, request, view=self)
+            serializer = PortfolioReadSerializer(page, many=True)
+            paginated = paginator.get_paginated_response(serializer.data).data
+            return {
+                "success": True,
+                "message": "Portfolios retrieved",
+                "data": paginated,
+                "errors": None,
+            }
+
+        return Response(get_or_build(key, ttl_portfolio(), build))
 
     def post(self, request: Request) -> Response:
         serializer = PortfolioWriteSerializer(data=request.data)
@@ -133,7 +165,18 @@ class PortfolioDetailView(PortfolioAPIView):
         portfolio = self.get_owned_portfolio(request, portfolio_id)
         if portfolio is None:
             return portfolio_not_found()
-        return success("Portfolio retrieved", PortfolioReadSerializer(portfolio).data)
+        user_id = _user_id(request)
+        key = portfolio_detail_key(user_id, portfolio.pk)
+
+        def build() -> dict[str, object]:
+            return {
+                "success": True,
+                "message": "Portfolio retrieved",
+                "data": PortfolioReadSerializer(portfolio).data,
+                "errors": None,
+            }
+
+        return Response(get_or_build(key, ttl_portfolio(), build))
 
     def patch(self, request: Request, portfolio_id: uuid.UUID) -> Response:
         portfolio = self.get_owned_portfolio(request, portfolio_id)
@@ -185,13 +228,23 @@ class PortfolioInstrumentListCreateView(PortfolioAPIView):
         portfolio = self.get_owned_portfolio(request, portfolio_id)
         if portfolio is None:
             return portfolio_not_found()
+        user_id = _user_id(request)
+        key = portfolio_instruments_key(user_id, portfolio.pk, _page_parts(request))
 
-        queryset = list_portfolio_instruments(portfolio)
-        paginator = PortfolioPagination()
-        page = paginator.paginate_queryset(queryset, request, view=self)
-        serializer = PortfolioInstrumentReadSerializer(page, many=True)
-        paginated = paginator.get_paginated_response(serializer.data).data
-        return success("Portfolio instruments retrieved", paginated)
+        def build() -> dict[str, object]:
+            queryset = list_portfolio_instruments(portfolio)
+            paginator = PortfolioPagination()
+            page = paginator.paginate_queryset(queryset, request, view=self)
+            serializer = PortfolioInstrumentReadSerializer(page, many=True)
+            paginated = paginator.get_paginated_response(serializer.data).data
+            return {
+                "success": True,
+                "message": "Portfolio instruments retrieved",
+                "data": paginated,
+                "errors": None,
+            }
+
+        return Response(get_or_build(key, ttl_portfolio(), build))
 
     def post(self, request: Request, portfolio_id: uuid.UUID) -> Response:
         portfolio = self.get_owned_portfolio(request, portfolio_id)
@@ -405,7 +458,19 @@ def _portfolio_by_name_response(request: Request, name: str) -> Response:
     error = _name_lookup_error(request, name, found)
     if error is not None:
         return error
-    return success("Portfolio retrieved", PortfolioReadSerializer(found[0]).data)
+    portfolio = found[0]
+    user_id = _user_id(request)
+    key = portfolio_detail_key(user_id, portfolio.pk)
+
+    def build() -> dict[str, object]:
+        return {
+            "success": True,
+            "message": "Portfolio retrieved",
+            "data": PortfolioReadSerializer(portfolio).data,
+            "errors": None,
+        }
+
+    return Response(get_or_build(key, ttl_portfolio(), build))
 
 
 class PortfolioInstrumentBulkView(PortfolioAPIView):

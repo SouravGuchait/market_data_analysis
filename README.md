@@ -592,7 +592,8 @@ GET /api/v1/analytics/returns/?instrument_name=Glaxo%20Robotics&exchange_code=XN
 
 Returns payloads include metric metadata, instrument/exchange identifiers,
 lookback requirements, and dated `value` observations (`null` until a prior
-valid close exists). Redis caching for analytics is deferred.
+valid close exists). Feature 015 caches selected GET responses in Redis with
+generation-counter invalidation; see `docs/ARCHITECTURE.md`.
 
 How to exercise the APIs locally (Docker web on port 8000):
 

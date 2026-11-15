@@ -168,8 +168,22 @@ CACHES = {
         "LOCATION": env_str("CACHE_URL"),
         "KEY_PREFIX": env_str("CACHE_KEY_PREFIX", "mda"),
         "TIMEOUT": env_int("CACHE_DEFAULT_TIMEOUT", 300),
+        "OPTIONS": {
+            "socket_connect_timeout": env_int("CACHE_SOCKET_CONNECT_TIMEOUT", 1),
+            "socket_timeout": env_int("CACHE_SOCKET_TIMEOUT", 1),
+        },
     }
 }
+
+# Feature 015 response-cache TTLs (seconds). Generation counters invalidate early.
+CACHE_TTL_CATALOG = env_int("CACHE_TTL_CATALOG", 3600)
+CACHE_TTL_PORTFOLIO = env_int("CACHE_TTL_PORTFOLIO", 60)
+CACHE_TTL_CANDLES_HISTORICAL = env_int("CACHE_TTL_CANDLES_HISTORICAL", 600)
+CACHE_TTL_CANDLES_RECENT = env_int("CACHE_TTL_CANDLES_RECENT", 30)
+CACHE_TTL_RETURNS = env_int("CACHE_TTL_RETURNS", 300)
+CACHE_TTL_INDICATORS_HISTORICAL = env_int("CACHE_TTL_INDICATORS_HISTORICAL", 300)
+CACHE_TTL_INDICATORS_RECENT = env_int("CACHE_TTL_INDICATORS_RECENT", 30)
+CACHE_RECENT_WINDOW_SECONDS = env_int("CACHE_RECENT_WINDOW_SECONDS", 172800)
 
 AUTH_PASSWORD_VALIDATORS = [
     {

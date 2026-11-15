@@ -49,6 +49,9 @@ CELERY_TASK_EAGER_PROPAGATES = True
 CELERY_BROKER_URL = "memory://"
 CELERY_RESULT_BACKEND = "cache+memory://"
 
+# TestCase rolls back the outer transaction, so on_commit hooks never fire.
+CACHE_BUMP_EAGER = True
+
 PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",
 ]

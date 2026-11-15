@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from math import isclose
 from typing import TypedDict
 
 import pytest
+from django.http import HttpResponse
 from django.urls import reverse
-from rest_framework.response import Response
 from rest_framework.test import APIClient
 
 from apps.analytics.services.metrics_calculator import ema_series, macd_series, sma_series
@@ -145,9 +146,9 @@ def _points(value: object) -> list[_Point]:
     return [_point(item) for item in value]
 
 
-def _results(response: Response) -> list[dict[str, object]]:
+def _results(response: HttpResponse) -> list[dict[str, object]]:
     assert response.status_code == 200, response.content
-    body = _mapping(response.data)
+    body = _mapping(json.loads(response.content.decode()))
     assert body["success"] is True
     assert body["errors"] is None
     data = _mapping(body["data"])
@@ -375,6 +376,10 @@ def test_corrected_candle_is_recalculated_on_next_read(auth_client, instrument, 
     candles[3].close = Decimal(10)
     candles[3].high = Decimal(10)
     candles[3].save(update_fields=["close", "high"])
+    # Direct candle edits must invalidate like aggregation (Feature 015).
+    from apps.common.cache_service import bump_market_version
+
+    bump_market_version()
     after = _points(_results(auth_client.get(SMA_URL, params))[0]["results"])
     assert after[2]["value"] == 2
     _close(after[3]["value"], 5)
@@ -483,7 +488,7 @@ def test_daily_ohlcv_is_not_an_indicator_source(auth_client, instrument) -> None
 @pytest.mark.django_db
 def test_indicator_validation_and_authentication(auth_client, instrument) -> None:
     denied = APIClient().get(SMA_URL, {"instrument_id": instrument.pk, "timeframe": "1m"})
-    assert isinstance(denied, Response)
+    assert isinstance(denied, HttpResponse)
     assert denied.status_code == 401
     missing = auth_client.get(EMA_URL, {"timeframe": "1m"})
     assert missing.status_code == 400
