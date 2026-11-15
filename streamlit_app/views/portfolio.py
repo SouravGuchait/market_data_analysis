@@ -157,9 +157,7 @@ def _attach_instrument(client: object, portfolio_id: str) -> None:
     st.text_input(
         "Asset class", value=asset_class, disabled=True, key=f"pf_attach_asset_{widget_key}"
     )
-    st.text_input(
-        "Currency", value=currency, disabled=True, key=f"pf_attach_currency_{widget_key}"
-    )
+    st.text_input("Currency", value=currency, disabled=True, key=f"pf_attach_currency_{widget_key}")
     alias = st.text_input("Alias", value="", key=f"pf_attach_alias_{widget_key}")
     if st.button("Add", type="primary", key=f"pf_attach_add_{widget_key}"):
         _post_bulk_attach(

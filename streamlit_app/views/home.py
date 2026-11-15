@@ -479,9 +479,7 @@ def _aggregation_validation_error(
 
 
 def _day_start_iso(day: date) -> str:
-    return (
-        datetime(day.year, day.month, day.day, tzinfo=UTC).isoformat().replace("+00:00", "Z")
-    )
+    return datetime(day.year, day.month, day.day, tzinfo=UTC).isoformat().replace("+00:00", "Z")
 
 
 def _day_end_iso(day: date) -> str:

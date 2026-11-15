@@ -119,9 +119,7 @@ def test_validation_error_includes_field_details(client: ApiClient) -> None:
                 "success": False,
                 "message": "Validation failed",
                 "data": None,
-                "errors": {
-                    "name": ["A validation rule set with this name and version exists."]
-                },
+                "errors": {"name": ["A validation rule set with this name and version exists."]},
             },
         )
 

@@ -65,7 +65,6 @@ def find_instrument(
     return None
 
 
-
 def select_symbol_and_exchange(
     instruments: Sequence[Mapping[str, object]],
     *,

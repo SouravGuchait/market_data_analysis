@@ -212,9 +212,7 @@ def _ingestion_rules(client: object) -> None:
         "exchange_mapping": {"exchange_identifier": "exchange"},
         "validation_rule_set_id": set_labels[vrs],
     }
-    result = run_api(
-        client, lambda: endpoints.post_json(client, "/api/v1/ingestion/rules/", body)
-    )
+    result = run_api(client, lambda: endpoints.post_json(client, "/api/v1/ingestion/rules/", body))
     if result is not None:
         st.success("Ingestion rule created.")
         st.rerun()

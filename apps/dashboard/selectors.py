@@ -61,9 +61,7 @@ def list_instrument_choices() -> Mapping[str, list[str]]:
     """Distinct asset_class / currency values present on instrument rows."""
 
     asset_classes = list(
-        Instrument.objects.order_by("asset_class")
-        .values_list("asset_class", flat=True)
-        .distinct()
+        Instrument.objects.order_by("asset_class").values_list("asset_class", flat=True).distinct()
     )
     currencies = list(
         Instrument.objects.order_by("currency").values_list("currency", flat=True).distinct()

@@ -134,10 +134,6 @@ class DailyOHLCVFilterSerializer(_ScopeFilterSerializer):
                 )
             if (end - start).days > MAX_DAILY_RANGE_DAYS:
                 raise serializers.ValidationError(
-                    {
-                        "end_date": [
-                            f"Date range must not exceed {MAX_DAILY_RANGE_DAYS} days."
-                        ]
-                    }
+                    {"end_date": [f"Date range must not exceed {MAX_DAILY_RANGE_DAYS} days."]}
                 )
         return attrs
