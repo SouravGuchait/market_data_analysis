@@ -110,6 +110,7 @@ INSTALLED_APPS = [
     "apps.portfolios",
     "apps.analytics",
     "apps.audit",
+    "apps.dashboard",
     "django_zxcvbn_password_validator",
 ]
 
@@ -278,6 +279,8 @@ REST_FRAMEWORK = {
         "ingestion_upload": "30/min",
         "analytics_read": "120/min",
         "analytics_aggregate": "30/min",
+        "dashboard_read": "60/min",
+        "market_data_read": "120/min",
     },
 }
 

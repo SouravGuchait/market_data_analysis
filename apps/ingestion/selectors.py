@@ -9,7 +9,14 @@ from datetime import datetime
 from django.contrib.auth.models import User
 from django.db.models import QuerySet
 
-from .models import Ingestion, IngestionRule, IngestionState, RejectedRow, StorageFile
+from .models import (
+    Ingestion,
+    IngestionRule,
+    IngestionState,
+    RejectedRow,
+    StorageFile,
+    ValidationRuleSet,
+)
 
 
 def list_storage_files(owner: User) -> QuerySet[StorageFile]:
@@ -18,6 +25,13 @@ def list_storage_files(owner: User) -> QuerySet[StorageFile]:
 
 def list_owned_rules(owner: User) -> QuerySet[IngestionRule]:
     return IngestionRule.objects.filter(owner=owner)
+
+
+def list_validation_rule_sets(*, data_type: str = "") -> QuerySet[ValidationRuleSet]:
+    queryset = ValidationRuleSet.objects.filter(is_active=True).prefetch_related("rules")
+    if data_type:
+        return queryset.filter(data_type=data_type)
+    return queryset
 
 
 def get_owned_rule(owner: User, rule_id: uuid.UUID) -> IngestionRule | None:

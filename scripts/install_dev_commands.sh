@@ -41,7 +41,7 @@ _mda_compose() {
 
 dev_up() { _mda_compose up -d "\$@"; }
 dev_down() { _mda_compose down "\$@"; }
-dev_restart() { _mda_compose up -d --build --force-recreate "\$@"; }
+dev_restart() { _mda_compose up -d --force-recreate "\$@"; }
 dev_build() { _mda_compose build "\$@"; }
 EOF
 

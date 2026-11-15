@@ -112,7 +112,11 @@ jobs:
             apps/portfolios/tests/test_bulk_attach.py \
             apps/portfolios/tests/test_cache_isolation.py \
             apps/audit/tests/test_audit_api.py \
-            apps/ingestion/tests/test_user_ingestion_api.py
+            apps/ingestion/tests/test_user_ingestion_api.py \
+            apps/market_data/tests/test_tick_api.py \
+            apps/market_data/tests/test_daily_ohlcv_api.py \
+            apps/dashboard/tests/test_bootstrap_api.py \
+            apps/dashboard/tests/test_bootstrap.py
 
       - name: Authentication and ownership tests
         run: |
@@ -147,7 +151,10 @@ jobs:
         run: .venv/bin/python -m pytest -q apps/analytics/tests/test_aggregation.py
 
       - name: Analytics formula tests
-        run: .venv/bin/python -m pytest -q apps/analytics/tests/test_returns.py
+        run: |
+          .venv/bin/python -m pytest -q \
+            apps/analytics/tests/test_returns.py \
+            apps/analytics/tests/test_overview.py
 
       - name: Trend indicator tests
         run: .venv/bin/python -m pytest -q apps/analytics/tests/test_trend_indicators.py
@@ -177,19 +184,16 @@ jobs:
   streamlit:
     name: streamlit
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: ./.github/actions/setup-python
+
       - name: Streamlit frontend tests
-        run: |
-          set -euo pipefail
-          if [ -f requirements-streamlit.txt ] || [ -d frontend ]; then
-            echo "A Streamlit frontend is present, but this workflow has no frontend test command."
-            exit 1
-          fi
-          echo "No Streamlit frontend is in this repository. This step is not applicable."
+        run: .venv/bin/python -m pytest -q streamlit_app/tests
 
   docker:
     name: docker

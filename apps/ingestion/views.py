@@ -31,6 +31,7 @@ from .selectors import (
     list_owned_rejections,
     list_owned_rules,
     list_storage_files,
+    list_validation_rule_sets,
 )
 from .serializers import (
     ConfiguredImportSerializer,
@@ -220,6 +221,17 @@ class ValidationRuleSetCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(tags=["ingestion"])
+    def get(self, request: Request) -> Response:
+        data_type = request.query_params.get("data_type", "")
+        return _paginated(
+            self,
+            request,
+            list_validation_rule_sets(data_type=data_type),
+            ValidationRuleSetReadSerializer,
+            "Validation rule sets retrieved",
+        )
+
+    @extend_schema(tags=["ingestion"])
     def post(self, request: Request) -> Response:
         serializer = ValidationRuleSetWriteSerializer(data=request.data)
         if not serializer.is_valid():
@@ -407,7 +419,8 @@ def _paginated(
     | type[IngestionRuleReadSerializer]
     | type[IngestionReadSerializer]
     | type[IngestionLogSerializer]
-    | type[RejectedRowReadSerializer],
+    | type[RejectedRowReadSerializer]
+    | type[ValidationRuleSetReadSerializer],
     message: str,
 ) -> Response:
     paginator = IngestionPagination()
