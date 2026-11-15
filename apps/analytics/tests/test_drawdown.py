@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from math import isclose
 
 import pytest
+from django.http import HttpResponse
 from django.urls import reverse
-from rest_framework.response import Response
 from rest_framework.test import APIClient
 
 from apps.analytics.services.metrics_calculator import (
@@ -107,9 +108,9 @@ def _mapping(value: object) -> dict[str, object]:
     return value
 
 
-def _results(response: Response) -> list[dict[str, object]]:
+def _results(response: HttpResponse) -> list[dict[str, object]]:
     assert response.status_code == 200, response.content
-    body = _mapping(response.data)
+    body = _mapping(json.loads(response.content.decode()))
     assert body["success"] is True
     data = _mapping(body["data"])
     results = data["results"]
@@ -237,10 +238,10 @@ def test_drawdown_get_does_not_write_audit(auth_client, instrument) -> None:
 @pytest.mark.django_db
 def test_drawdown_auth_and_validation(auth_client, instrument, other_user) -> None:
     denied = APIClient().get(DRAWDOWN_URL, {"instrument_id": instrument.pk})
-    assert isinstance(denied, Response)
+    assert isinstance(denied, HttpResponse)
     assert denied.status_code == 401
     missing = auth_client.get(DRAWDOWN_URL)
-    assert isinstance(missing, Response)
+    assert isinstance(missing, HttpResponse)
     assert missing.status_code == 400
     ordered = auth_client.get(
         DRAWDOWN_URL,
@@ -250,9 +251,9 @@ def test_drawdown_auth_and_validation(auth_client, instrument, other_user) -> No
             "end_date": "2024-01-01",
         },
     )
-    assert isinstance(ordered, Response)
+    assert isinstance(ordered, HttpResponse)
     assert ordered.status_code == 400
     portfolio = Portfolio.objects.create(owner=other_user, name="Private")
     foreign = auth_client.get(DRAWDOWN_URL, {"portfolio_id": str(portfolio.pk)})
-    assert isinstance(foreign, Response)
+    assert isinstance(foreign, HttpResponse)
     assert foreign.status_code == 404

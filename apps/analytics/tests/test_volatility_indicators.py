@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from math import isclose, sqrt
 from typing import TypedDict
 
 import pytest
+from django.http import HttpResponse
 from django.urls import reverse
-from rest_framework.response import Response
 from rest_framework.test import APIClient
 
 from apps.analytics.services.metrics_calculator import (
@@ -209,9 +210,9 @@ def _bands(value: object) -> list[_BandPoint]:
     return [_band(item) for item in value]
 
 
-def _results(response: Response) -> list[dict[str, object]]:
+def _results(response: HttpResponse) -> list[dict[str, object]]:
     assert response.status_code == 200, response.content
-    body = _mapping(response.data)
+    body = _mapping(json.loads(response.content.decode()))
     assert body["success"] is True
     data = _mapping(body["data"])
     results = data["results"]
@@ -519,15 +520,15 @@ def test_volatility_get_does_not_write_audit(auth_client, instrument, exchange) 
 @pytest.mark.django_db
 def test_volatility_auth_and_validation(auth_client, instrument) -> None:
     denied = APIClient().get(ATR_URL, {"instrument_id": instrument.pk, "timeframe": "1m"})
-    assert isinstance(denied, Response)
+    assert isinstance(denied, HttpResponse)
     assert denied.status_code == 401
     missing = auth_client.get(BOLLINGER_URL, {"timeframe": "1m"})
-    assert isinstance(missing, Response)
+    assert isinstance(missing, HttpResponse)
     assert missing.status_code == 400
     window = auth_client.get(
         ATR_URL, {"instrument_id": instrument.pk, "timeframe": "1m", "window": 1}
     )
-    assert isinstance(window, Response)
+    assert isinstance(window, HttpResponse)
     assert window.status_code == 400
     span = auth_client.get(
         ATR_URL,
@@ -538,7 +539,7 @@ def test_volatility_auth_and_validation(auth_client, instrument) -> None:
             "end": "2030-02-01T00:00:00Z",
         },
     )
-    assert isinstance(span, Response)
+    assert isinstance(span, HttpResponse)
     assert span.status_code == 400
 
 

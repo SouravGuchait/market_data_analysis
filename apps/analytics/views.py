@@ -15,7 +15,6 @@ from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
-from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.analytics.models import AggregationTrigger
@@ -98,14 +97,35 @@ def _user(request: Request) -> AbstractBaseUser:
     raise PermissionError("Authentication required.")
 
 
+def api_json(
+    *,
+    success_flag: bool,
+    message: str,
+    data: object = None,
+    errors: object = None,
+    status_code: int = status.HTTP_200_OK,
+) -> JsonResponse:
+    return JsonResponse(
+        {
+            "success": success_flag,
+            "message": message,
+            "data": data,
+            "errors": errors,
+        },
+        status=status_code,
+    )
+
+
 def success(
     message: str,
     data: object = None,
     status_code: int = status.HTTP_200_OK,
-) -> Response:
-    return Response(
-        {"success": True, "message": message, "data": data, "errors": None},
-        status=status_code,
+) -> JsonResponse:
+    return api_json(
+        success_flag=True,
+        message=message,
+        data=data,
+        status_code=status_code,
     )
 
 
@@ -115,11 +135,17 @@ def _paginated[M: Model](
     queryset: QuerySet[M],
     serializer_class: type[serializers.BaseSerializer[Model]],
     message: str,
-) -> Response:
+) -> dict[str, object]:
     paginator = StandardResultsPagination()
     page = paginator.paginate_queryset(queryset, request, view=view)
     serializer = serializer_class(page, many=True)
-    return success(message, paginator.get_paginated_response(serializer.data).data)
+    page_data = paginator.get_paginated_response(serializer.data).data
+    return {
+        "success": True,
+        "message": message,
+        "data": page_data,
+        "errors": None,
+    }
 
 
 def _page_parts(request: Request) -> dict[str, object]:
@@ -148,7 +174,7 @@ class CandleListView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_scope = "analytics_read"
 
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         filters = CandleFilterSerializer(data=request.query_params)
         if not filters.is_valid():
             return failure("Invalid candle filters", filters.errors)
@@ -180,38 +206,9 @@ class CandleListView(APIView):
                 range_start=range_start if isinstance(range_start, datetime) else None,
                 range_end=end_dt,
             )
-            raw = _paginated(
-                self, request, queryset, CandleReadSerializer, "Candles retrieved"
-            ).data
-            if isinstance(raw, dict):
-                return {str(item_key): item for item_key, item in raw.items()}
-            return {
-                "success": True,
-                "message": "Candles retrieved",
-                "data": raw,
-                "errors": None,
-            }
+            return _paginated(self, request, queryset, CandleReadSerializer, "Candles retrieved")
 
-        return Response(get_or_build(key, ttl, build))
-
-
-def _returns_json(
-    *,
-    success_flag: bool,
-    message: str,
-    data: object = None,
-    errors: object = None,
-    status_code: int = status.HTTP_200_OK,
-) -> JsonResponse:
-    return JsonResponse(
-        {
-            "success": success_flag,
-            "message": message,
-            "data": data,
-            "errors": errors,
-        },
-        status=status_code,
-    )
+        return JsonResponse(get_or_build(key, ttl, build))
 
 
 def _optional_date(value: object) -> date | None:
@@ -222,13 +219,7 @@ def _returns_from_scope(request: Request, data: dict[str, object]) -> JsonRespon
     user = _user(request)
     instrument_ids, exchange_ids, error = resolve_scope(user, data)
     if error is not None:
-        payload = error.data if isinstance(error.data, dict) else {}
-        return _returns_json(
-            success_flag=False,
-            message=str(payload.get("message", "Request failed")),
-            errors=payload.get("errors"),
-            status_code=int(error.status_code),
-        )
+        return error
     ids = instrument_ids or []
     start_date = _optional_date(data.get("start_date"))
     end_date = _optional_date(data.get("end_date"))
@@ -265,7 +256,7 @@ class ReturnsListView(APIView):
     def get(self, request: Request) -> JsonResponse:
         filters = ReturnsFilterSerializer(data=request.query_params)
         if not filters.is_valid():
-            return _returns_json(
+            return api_json(
                 success_flag=False,
                 message="Invalid return filters",
                 errors=filters.errors,
@@ -274,7 +265,7 @@ class ReturnsListView(APIView):
         return _returns_from_scope(request, _mapping(filters.validated_data))
 
 
-def _drawdown_from_scope(request: Request, data: dict[str, object]) -> Response:
+def _drawdown_from_scope(request: Request, data: dict[str, object]) -> JsonResponse:
     user = _user(request)
     instrument_ids, exchange_ids, error = resolve_scope(user, data)
     if error is not None:
@@ -303,7 +294,7 @@ def _drawdown_from_scope(request: Request, data: dict[str, object]) -> Response:
             "errors": None,
         }
 
-    return Response(get_or_build(key, ttl_returns(), build))
+    return JsonResponse(get_or_build(key, ttl_returns(), build))
 
 
 class DrawdownListView(APIView):
@@ -313,7 +304,7 @@ class DrawdownListView(APIView):
     throttle_scope = "analytics_read"
 
     @extend_schema(parameters=[DrawdownFilterSerializer], tags=["analytics"])
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         filters = DrawdownFilterSerializer(data=request.query_params)
         if not filters.is_valid():
             return failure("Invalid drawdown filters", filters.errors)
@@ -347,7 +338,7 @@ def _dt_field(data: dict[str, object], key: str) -> datetime | None:
     return None
 
 
-def _scoped_ids(request: Request, data: dict[str, object]) -> _Scope | Response:
+def _scoped_ids(request: Request, data: dict[str, object]) -> _Scope | JsonResponse:
     instrument_ids, exchange_ids, error = resolve_scope(_user(request), data)
     if error is not None:
         return error
@@ -433,7 +424,7 @@ def _store_indicator(
     request: Request,
     spec: _IndicatorCacheSpec,
     results: list[object],
-) -> Response:
+) -> JsonResponse:
     _log_indicator(request, spec.metric, spec.timeframe, len(results))
     payload: dict[str, object] = {
         "success": True,
@@ -442,32 +433,32 @@ def _store_indicator(
         "errors": None,
     }
     cache_set(spec.key, payload, spec.ttl)
-    return Response(payload)
+    return JsonResponse(payload)
 
 
-def _indicator_hit(spec: _IndicatorCacheSpec) -> Response | None:
+def _indicator_hit(spec: _IndicatorCacheSpec) -> JsonResponse | None:
     hit = cache_load_dict(spec.key)
     if hit is None:
         return None
-    return Response(hit)
+    return JsonResponse(hit)
 
 
 def _scoped_filter_data(
     request: Request,
     serializer_cls: type[serializers.Serializer],
     message: str,
-) -> Response | tuple[dict[str, object], _Scope]:
+) -> JsonResponse | tuple[dict[str, object], _Scope]:
     filters = serializer_cls(data=request.query_params)
     if not filters.is_valid():
         return failure(message, filters.errors)
     data = _mapping(filters.validated_data)
     scope = _scoped_ids(request, data)
-    if isinstance(scope, Response):
+    if isinstance(scope, JsonResponse):
         return scope
     return data, scope
 
 
-def _require_query[Q](query: Q | None, message: str) -> Response | Q:
+def _require_query[Q](query: Q | None, message: str) -> JsonResponse | Q:
     if query is None:
         return failure(message, {"detail": ["Invalid indicator parameters."]})
     return query
@@ -477,7 +468,7 @@ def _compute_or_fail(
     request: Request,
     spec: _IndicatorCacheSpec,
     outcome: IndicatorLimitError | Sequence[object],
-) -> Response:
+) -> JsonResponse:
     if isinstance(outcome, IndicatorLimitError):
         return failure(outcome.message, outcome.errors)
     return _store_indicator(request, spec, list(outcome))
@@ -487,7 +478,7 @@ def _cached_compute(
     request: Request,
     spec: _IndicatorCacheSpec,
     compute: Callable[[], IndicatorLimitError | Sequence[object]],
-) -> Response:
+) -> JsonResponse:
     cached = _indicator_hit(spec)
     if cached is not None:
         return cached
@@ -499,7 +490,7 @@ def _window_cached(
     query: WindowIndicatorQuery,
     metric: str,
     message: str,
-) -> Response:
+) -> JsonResponse:
     spec = _indicator_spec(
         request, query.candles, {"metric": metric, "window": query.window}, message
     )
@@ -510,14 +501,14 @@ def _window_cached(
     return _cached_compute(request, spec, compute)
 
 
-def window_indicator_response(request: Request, *, metric: str, message: str) -> Response:
+def window_indicator_response(request: Request, *, metric: str, message: str) -> JsonResponse:
     err_msg = f"Invalid {metric} filters"
     prepared = _scoped_filter_data(request, WindowIndicatorFilterSerializer, err_msg)
-    if isinstance(prepared, Response):
+    if isinstance(prepared, JsonResponse):
         return prepared
     data, scope = prepared
     query = _require_query(_window_query(data, scope), err_msg)
-    if isinstance(query, Response):
+    if isinstance(query, JsonResponse):
         return query
     return _window_cached(request, query, metric, message)
 
@@ -537,7 +528,7 @@ def _macd_query(data: dict[str, object], scope: _Scope) -> MacdIndicatorQuery | 
     )
 
 
-def _macd_cached(request: Request, query: MacdIndicatorQuery) -> Response:
+def _macd_cached(request: Request, query: MacdIndicatorQuery) -> JsonResponse:
     params = {
         "metric": "macd",
         "fast_period": query.fast_period,
@@ -548,13 +539,13 @@ def _macd_cached(request: Request, query: MacdIndicatorQuery) -> Response:
     return _cached_compute(request, spec, lambda: build_macd_series(query))
 
 
-def macd_indicator_response(request: Request) -> Response:
+def macd_indicator_response(request: Request) -> JsonResponse:
     prepared = _scoped_filter_data(request, MacdIndicatorFilterSerializer, "Invalid macd filters")
-    if isinstance(prepared, Response):
+    if isinstance(prepared, JsonResponse):
         return prepared
     data, scope = prepared
     query = _require_query(_macd_query(data, scope), "Invalid macd filters")
-    if isinstance(query, Response):
+    if isinstance(query, JsonResponse):
         return query
     return _macd_cached(request, query)
 
@@ -566,7 +557,7 @@ class SmaListView(APIView):
     throttle_scope = "analytics_read"
 
     @extend_schema(parameters=[WindowIndicatorFilterSerializer], tags=["analytics"])
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         return window_indicator_response(request, metric="sma", message="SMA retrieved")
 
 
@@ -577,7 +568,7 @@ class EmaListView(APIView):
     throttle_scope = "analytics_read"
 
     @extend_schema(parameters=[WindowIndicatorFilterSerializer], tags=["analytics"])
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         return window_indicator_response(request, metric="ema", message="EMA retrieved")
 
 
@@ -588,7 +579,7 @@ class MacdListView(APIView):
     throttle_scope = "analytics_read"
 
     @extend_schema(parameters=[MacdIndicatorFilterSerializer], tags=["analytics"])
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         return macd_indicator_response(request)
 
 
@@ -612,7 +603,7 @@ def _bollinger_query(data: dict[str, object], scope: _Scope) -> BollingerIndicat
     )
 
 
-def _bollinger_cached(request: Request, query: BollingerIndicatorQuery) -> Response:
+def _bollinger_cached(request: Request, query: BollingerIndicatorQuery) -> JsonResponse:
     params = {
         "metric": "bollinger",
         "window": query.window,
@@ -622,15 +613,15 @@ def _bollinger_cached(request: Request, query: BollingerIndicatorQuery) -> Respo
     return _cached_compute(request, spec, lambda: build_bollinger_series(query))
 
 
-def bollinger_indicator_response(request: Request) -> Response:
+def bollinger_indicator_response(request: Request) -> JsonResponse:
     prepared = _scoped_filter_data(
         request, BollingerIndicatorFilterSerializer, "Invalid bollinger filters"
     )
-    if isinstance(prepared, Response):
+    if isinstance(prepared, JsonResponse):
         return prepared
     data, scope = prepared
     query = _require_query(_bollinger_query(data, scope), "Invalid bollinger filters")
-    if isinstance(query, Response):
+    if isinstance(query, JsonResponse):
         return query
     return _bollinger_cached(request, query)
 
@@ -643,19 +634,19 @@ def _atr_query(data: dict[str, object], scope: _Scope) -> AtrIndicatorQuery | No
     return AtrIndicatorQuery(candles=_candle_query(data, scope, timeframe), window=window)
 
 
-def _atr_cached(request: Request, query: AtrIndicatorQuery) -> Response:
+def _atr_cached(request: Request, query: AtrIndicatorQuery) -> JsonResponse:
     params = {"metric": "atr", "window": query.window}
     spec = _indicator_spec(request, query.candles, params, "ATR retrieved")
     return _cached_compute(request, spec, lambda: build_atr_series(query))
 
 
-def atr_indicator_response(request: Request) -> Response:
+def atr_indicator_response(request: Request) -> JsonResponse:
     prepared = _scoped_filter_data(request, AtrIndicatorFilterSerializer, "Invalid atr filters")
-    if isinstance(prepared, Response):
+    if isinstance(prepared, JsonResponse):
         return prepared
     data, scope = prepared
     query = _require_query(_atr_query(data, scope), "Invalid atr filters")
-    if isinstance(query, Response):
+    if isinstance(query, JsonResponse):
         return query
     return _atr_cached(request, query)
 
@@ -667,7 +658,7 @@ class BollingerListView(APIView):
     throttle_scope = "analytics_read"
 
     @extend_schema(parameters=[BollingerIndicatorFilterSerializer], tags=["analytics"])
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         return bollinger_indicator_response(request)
 
 
@@ -678,7 +669,7 @@ class AtrListView(APIView):
     throttle_scope = "analytics_read"
 
     @extend_schema(parameters=[AtrIndicatorFilterSerializer], tags=["analytics"])
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         return atr_indicator_response(request)
 
 
@@ -690,19 +681,19 @@ def _rsi_query(data: dict[str, object], scope: _Scope) -> RsiIndicatorQuery | No
     return RsiIndicatorQuery(candles=_candle_query(data, scope, timeframe), window=window)
 
 
-def _rsi_cached(request: Request, query: RsiIndicatorQuery) -> Response:
+def _rsi_cached(request: Request, query: RsiIndicatorQuery) -> JsonResponse:
     params = {"metric": "rsi", "window": query.window}
     spec = _indicator_spec(request, query.candles, params, "RSI retrieved")
     return _cached_compute(request, spec, lambda: build_rsi_series(query))
 
 
-def rsi_indicator_response(request: Request) -> Response:
+def rsi_indicator_response(request: Request) -> JsonResponse:
     prepared = _scoped_filter_data(request, RsiIndicatorFilterSerializer, "Invalid rsi filters")
-    if isinstance(prepared, Response):
+    if isinstance(prepared, JsonResponse):
         return prepared
     data, scope = prepared
     query = _require_query(_rsi_query(data, scope), "Invalid rsi filters")
-    if isinstance(query, Response):
+    if isinstance(query, JsonResponse):
         return query
     return _rsi_cached(request, query)
 
@@ -720,7 +711,7 @@ def _stochastic_query(data: dict[str, object], scope: _Scope) -> StochasticIndic
     )
 
 
-def _stochastic_cached(request: Request, query: StochasticIndicatorQuery) -> Response:
+def _stochastic_cached(request: Request, query: StochasticIndicatorQuery) -> JsonResponse:
     params = {
         "metric": "stochastic",
         "window": query.window,
@@ -730,15 +721,15 @@ def _stochastic_cached(request: Request, query: StochasticIndicatorQuery) -> Res
     return _cached_compute(request, spec, lambda: build_stochastic_series(query))
 
 
-def stochastic_indicator_response(request: Request) -> Response:
+def stochastic_indicator_response(request: Request) -> JsonResponse:
     prepared = _scoped_filter_data(
         request, StochasticIndicatorFilterSerializer, "Invalid stochastic filters"
     )
-    if isinstance(prepared, Response):
+    if isinstance(prepared, JsonResponse):
         return prepared
     data, scope = prepared
     query = _require_query(_stochastic_query(data, scope), "Invalid stochastic filters")
-    if isinstance(query, Response):
+    if isinstance(query, JsonResponse):
         return query
     return _stochastic_cached(request, query)
 
@@ -750,7 +741,7 @@ class RsiListView(APIView):
     throttle_scope = "analytics_read"
 
     @extend_schema(parameters=[RsiIndicatorFilterSerializer], tags=["analytics"])
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         return rsi_indicator_response(request)
 
 
@@ -761,7 +752,7 @@ class StochasticListView(APIView):
     throttle_scope = "analytics_read"
 
     @extend_schema(parameters=[StochasticIndicatorFilterSerializer], tags=["analytics"])
-    def get(self, request: Request) -> Response:
+    def get(self, request: Request) -> JsonResponse:
         return stochastic_indicator_response(request)
 
 
@@ -803,7 +794,7 @@ def _resolve_manual_instrument(data: dict[str, object], exchange: Exchange) -> I
 def _manual_lookup_error(
     exchange: Exchange | None,
     instrument: Instrument | None,
-) -> Response | None:
+) -> JsonResponse | None:
     if exchange is None:
         return failure(
             "Exchange not found",
@@ -821,7 +812,7 @@ def _manual_lookup_error(
 
 def _validate_manual_targets(
     data: dict[str, object],
-) -> tuple[Instrument, Exchange, datetime, datetime] | Response:
+) -> tuple[Instrument, Exchange, datetime, datetime] | JsonResponse:
     exchange = _resolve_exchange(
         _as_optional_int(data.get("exchange_id")),
         _as_optional_str(data.get("exchange_code")),
@@ -851,9 +842,9 @@ def _string_list(value: object) -> list[str] | None:
     return names
 
 
-def _create_manual_run(request: Request, data: dict[str, object]) -> Response:
+def _create_manual_run(request: Request, data: dict[str, object]) -> JsonResponse:
     validated = _validate_manual_targets(data)
-    if isinstance(validated, Response):
+    if isinstance(validated, JsonResponse):
         return validated
     instrument, exchange, range_start, range_end = validated
     run = create_aggregation_run(
@@ -879,7 +870,7 @@ class AggregationCreateView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_scope = "analytics_aggregate"
 
-    def post(self, request: Request) -> Response:
+    def post(self, request: Request) -> JsonResponse:
         serializer = AggregationCreateSerializer(data=request.data)
         if not serializer.is_valid():
             return failure("Invalid aggregation request", serializer.errors)
@@ -890,7 +881,7 @@ class AggregationDetailView(APIView):
     permission_classes = [IsAuthenticated]
     throttle_scope = "analytics_read"
 
-    def get(self, request: Request, run_id: UUID) -> Response:
+    def get(self, request: Request, run_id: UUID) -> JsonResponse:
         run = get_aggregation_run(run_id)
         if run is None:
             return failure(

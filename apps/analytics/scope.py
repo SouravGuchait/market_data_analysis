@@ -5,8 +5,8 @@ from __future__ import annotations
 from uuid import UUID
 
 from django.contrib.auth.base_user import AbstractBaseUser
+from django.http import JsonResponse
 from rest_framework import status
-from rest_framework.response import Response
 
 from apps.analytics.selectors import (
     active_instrument_ids,
@@ -21,8 +21,8 @@ def failure(
     message: str,
     errors: object,
     status_code: int = status.HTTP_400_BAD_REQUEST,
-) -> Response:
-    return Response(
+) -> JsonResponse:
+    return JsonResponse(
         {"success": False, "message": message, "data": None, "errors": errors},
         status=status_code,
     )
@@ -60,7 +60,7 @@ def merge_instrument_ids(
     return selected
 
 
-def _identity_conflict(filters: dict[str, object]) -> Response | None:
+def _identity_conflict(filters: dict[str, object]) -> JsonResponse | None:
     has_id = filters.get("instrument_id") is not None
     has_symbol = bool(_as_str(filters.get("instrument_symbol")))
     has_name = bool(_as_str(filters.get("instrument_name")))
@@ -78,7 +78,7 @@ def _identity_conflict(filters: dict[str, object]) -> Response | None:
 
 def _portfolio_ids(
     user: AbstractBaseUser, filters: dict[str, object]
-) -> list[int] | None | Response:
+) -> list[int] | None | JsonResponse:
     portfolio_id = _as_uuid(filters.get("portfolio_id"))
     if portfolio_id is None:
         return None
@@ -95,7 +95,7 @@ def _portfolio_ids(
 def _named_instrument_ids(
     filters: dict[str, object],
     exchange_ids: list[int] | None,
-) -> list[int] | None | Response:
+) -> list[int] | None | JsonResponse:
     named_ids = resolve_instrument_ids_by_keys(
         instrument_symbol=_as_str(filters.get("instrument_symbol")),
         instrument_name=_as_str(filters.get("instrument_name")),
@@ -114,9 +114,9 @@ def _named_instrument_ids(
 def _scope_parts(
     user: AbstractBaseUser,
     filters: dict[str, object],
-) -> tuple[list[int] | None, list[int] | None, Response | None]:
+) -> tuple[list[int] | None, list[int] | None, JsonResponse | None]:
     portfolio_ids = _portfolio_ids(user, filters)
-    if isinstance(portfolio_ids, Response):
+    if isinstance(portfolio_ids, JsonResponse):
         return None, None, portfolio_ids
     exchange_ids = resolve_exchange_ids(
         exchange_id=_as_int(filters.get("exchange_id")),
@@ -124,7 +124,7 @@ def _scope_parts(
     )
     empty_exchange = exchange_ids is not None and not exchange_ids
     named_ids = None if empty_exchange else _named_instrument_ids(filters, exchange_ids)
-    if isinstance(named_ids, Response):
+    if isinstance(named_ids, JsonResponse):
         return None, None, named_ids
     instrument_ids = (
         []
@@ -142,7 +142,7 @@ def _scope_parts(
 def resolve_scope(
     user: AbstractBaseUser,
     filters: dict[str, object],
-) -> tuple[list[int] | None, list[int] | None, Response | None]:
+) -> tuple[list[int] | None, list[int] | None, JsonResponse | None]:
     conflict = _identity_conflict(filters)
     if conflict is not None:
         return None, None, conflict
