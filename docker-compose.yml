@@ -62,7 +62,8 @@ services:
       DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:?Set DJANGO_SETTINGS_MODULE in .env}
       DJANGO_DEBUG: ${DJANGO_DEBUG:?Set DJANGO_DEBUG in .env}
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
-      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?Set DJANGO_ALLOWED_HOSTS in .env}
+      # Always allow Compose DNS name `web` for in-network API calls (Streamlit).
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?Set DJANGO_ALLOWED_HOSTS in .env},web
       DB_NAME: ${DB_NAME:?Set DB_NAME in .env}
       DB_USER: ${DB_USER:?Set DB_USER in .env}
       DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
@@ -95,6 +96,14 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
       TIME_ZONE: ${TIME_ZONE:?Set TIME_ZONE in .env}
+      EMAIL_BACKEND: ${EMAIL_BACKEND:-django.core.mail.backends.console.EmailBackend}
+      EMAIL_HOST: ${EMAIL_HOST:-localhost}
+      EMAIL_PORT: ${EMAIL_PORT:-25}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+      EMAIL_USE_TLS: ${EMAIL_USE_TLS:-False}
+      DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-noreply@marketanalytics.com}
+      FRONTEND_RESET_URL: ${FRONTEND_RESET_URL:-http://localhost:8501}
     ports:
       - "${WEB_HOST_PORT:?Set WEB_HOST_PORT in .env}:8000"
     volumes:
@@ -152,6 +161,34 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+
+  streamlit:
+    build:
+      context: .
+    working_dir: /app
+    command:
+      [
+        "streamlit",
+        "run",
+        "streamlit_app/app.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+      ]
+    environment:
+      # Repo root must be importable so `import streamlit_app` works.
+      PYTHONPATH: /app
+      # In-compose traffic must use the Docker service DNS name, not localhost.
+      MDA_API_BASE_URL: ${COMPOSE_MDA_API_BASE_URL:-http://web:8000}
+      MDA_API_TIMEOUT_SECONDS: ${MDA_API_TIMEOUT_SECONDS:-30}
+      STREAMLIT_REFERENCE_CACHE_TTL: ${STREAMLIT_REFERENCE_CACHE_TTL:-300}
+      STREAMLIT_MARKET_CACHE_TTL: ${STREAMLIT_MARKET_CACHE_TTL:-30}
+    ports:
+      - "${STREAMLIT_HOST_PORT:-8501}:8501"
+    volumes:
+      - .:/app
+    depends_on:
+      web:
+        condition: service_started
 
 volumes:
   mysql_data:

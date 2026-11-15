@@ -34,6 +34,7 @@ from apps.analytics.serializers import (
     CandleReadSerializer,
     DrawdownFilterSerializer,
     MacdIndicatorFilterSerializer,
+    OverviewFilterSerializer,
     ReturnsFilterSerializer,
     RsiIndicatorFilterSerializer,
     StochasticIndicatorFilterSerializer,
@@ -54,6 +55,7 @@ from apps.analytics.services.momentum import (
     build_rsi_series,
     build_stochastic_series,
 )
+from apps.analytics.services.overview import OverviewRequest, build_overview
 from apps.analytics.services.trend import (
     IndicatorLimitError,
     MacdIndicatorQuery,
@@ -898,3 +900,75 @@ class AggregationDetailView(APIView):
                 status.HTTP_404_NOT_FOUND,
             )
         return success("Aggregation run retrieved", AggregationRunSerializer(run).data)
+
+
+def _int_or_default(data: dict[str, object], key: str, default: int) -> int:
+    value = data.get(key)
+    return value if isinstance(value, int) else default
+
+
+def _float_or_default(data: dict[str, object], key: str, default: float) -> float:
+    value = data.get(key)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int | float):
+        return float(value)
+    return default
+
+
+def _overview_request(
+    data: dict[str, object],
+    instrument_ids: list[int],
+    exchange_ids: list[int] | None,
+) -> OverviewRequest:
+    from apps.analytics.services.metrics_calculator import (
+        DEFAULT_BOLLINGER_MULTIPLIER,
+        DEFAULT_STOCHASTIC_SIGNAL,
+        DEFAULT_WINDOW,
+        MACD_DEFAULT_FAST,
+        MACD_DEFAULT_SIGNAL,
+        MACD_DEFAULT_SLOW,
+    )
+
+    metrics = data.get("parsed_metrics")
+    metric_tuple = metrics if isinstance(metrics, tuple) else ()
+    return OverviewRequest(
+        instrument_ids=instrument_ids,
+        exchange_ids=exchange_ids,
+        metrics=tuple(str(item) for item in metric_tuple),
+        timeframe=_text_field(data, "timeframe"),
+        start=_dt_field(data, "start"),
+        end=_dt_field(data, "end"),
+        start_date=_optional_date(data.get("start_date")),
+        end_date=_optional_date(data.get("end_date")),
+        include_incomplete=data.get("include_incomplete") is True,
+        return_type=str(data.get("return_type") or "simple"),
+        window=_int_or_default(data, "window", DEFAULT_WINDOW),
+        std_multiplier=_float_or_default(data, "std_multiplier", DEFAULT_BOLLINGER_MULTIPLIER),
+        fast_period=_int_or_default(data, "fast_period", MACD_DEFAULT_FAST),
+        slow_period=_int_or_default(data, "slow_period", MACD_DEFAULT_SLOW),
+        signal_period=_int_or_default(data, "signal_period", MACD_DEFAULT_SIGNAL),
+        stochastic_signal=_int_or_default(data, "stochastic_signal", DEFAULT_STOCHASTIC_SIGNAL),
+    )
+
+
+def overview_response(request: Request) -> JsonResponse:
+    prepared = _scoped_filter_data(request, OverviewFilterSerializer, "Invalid overview filters")
+    if isinstance(prepared, JsonResponse):
+        return prepared
+    data, scope = prepared
+    outcome = build_overview(_overview_request(data, scope.instrument_ids, scope.exchange_ids))
+    if isinstance(outcome, IndicatorLimitError):
+        return failure(outcome.message, outcome.errors)
+    return success("Analytics overview retrieved", outcome)
+
+
+class OverviewListView(APIView):
+    """Combined analytics overview. Reuses existing calculation services."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[OverviewFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> JsonResponse:
+        return overview_response(request)

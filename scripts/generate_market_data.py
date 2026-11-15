@@ -11,13 +11,16 @@ name, and every row has a calendar `date` plus a timezone-aware `timestamp`
 (market close in the exchange's local timezone).
 
 Examples:
+    # Clean+dirty OHLCV and ticks as CSV only (matches default ingestion rules)
+    python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 \\
+        --seed 42 --formats csv --output-dir sample_data
+
+    # Second run without duplicates: advance past the last trading day printed
+    python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 \\
+        --seed 42 --formats csv --start-date 2027-11-02 --no-dirty --output-dir sample_data
+
     python3 scripts/generate_market_data.py --exponent 5 --seed 42
     python3 scripts/generate_market_data.py --base 2 --exponent 16 --symbols 8
-    python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 --output-dir sample_data
-    python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 --seed 43 --output-dir sample_data
-    python scripts/generate_market_data.py --exponent 3 --ticks-per-day 1000 --seed 42
-    python scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 100 --seed 42
-    python scripts/generate_market_data.py --symbols 10 --exponent 5 --ticks-per-day 10 --seed 42
 """
 
 import argparse
@@ -102,9 +105,9 @@ COLUMNS = [
     "volume",
 ]
 
-# Kinds of corruption injected into dirty fixtures. Every kind appears at least
-# once. Two rows are also appended at the end: an exact duplicate of the first
-# clean row ("duplicate_date") and a conflicting duplicate (same exchange,
+# Kinds of corruption injected into dirty daily fixtures. Every kind appears at
+# least once. Two rows are also appended at the end: an exact duplicate of the
+# first clean row ("duplicate_date") and a conflicting duplicate (same exchange,
 # symbol and date, different volume).
 ERROR_KINDS = [
     "missing_field",
@@ -119,6 +122,19 @@ ERROR_KINDS = [
     "negative_price",
     "date_mismatch",
     "unknown_exchange",
+]
+
+# Tick-level faults. Validators reject by row; a readable dirty tick file ends
+# PARTIAL_SUCCESS when some rows remain valid, or FAILED when none do.
+TICK_ERROR_KINDS = [
+    "missing_price",
+    "negative_price",
+    "zero_size",
+    "bad_timestamp",
+    "bad_type",
+    "unknown_exchange",
+    "unknown_symbol",
+    "duplicate_trade_id",
 ]
 
 
@@ -289,6 +305,40 @@ def make_dirty_rows(rows: list[Row], rng: np.random.Generator) -> list[Row]:
     return dirty + [exact_duplicate, conflicting_duplicate]
 
 
+def make_dirty_ticks(ticks: list[Row], rng: np.random.Generator) -> list[Row]:
+    """Corrupt tick rows for row-level rejection testing against tick validators."""
+    if not ticks:
+        return []
+    dirty = [dict(row) for row in ticks]
+    count = len(dirty)
+    apply_kinds = TICK_ERROR_KINDS[: min(count, len(TICK_ERROR_KINDS))]
+    steps = max(len(apply_kinds) - 1, 1)
+    slots = [(i * (count - 1)) // steps for i in range(len(apply_kinds))]
+    for kind, index in zip(apply_kinds, slots, strict=True):
+        row = dirty[index]
+        if kind == "missing_price":
+            row.pop("price", None)
+        elif kind == "negative_price":
+            row["price"] = -abs(float(row["price"]))
+        elif kind == "zero_size":
+            row["size"] = 0
+        elif kind == "bad_timestamp":
+            row["timestamp"] = f"{row['timestamp']}tail"
+        elif kind == "bad_type":
+            row["size"] = "12k"
+        elif kind == "unknown_exchange":
+            row["exchange"] = "ZZZZ"
+        elif kind == "unknown_symbol":
+            row["symbol"] = "ZZZZZZ"
+        elif kind == "duplicate_trade_id":
+            row["trade_id"] = ticks[0]["trade_id"]
+    exact_duplicate = dict(ticks[0])
+    conflicting = dict(ticks[0])
+    bump = float(rng.uniform(0.01, 0.5))
+    conflicting["price"] = round(float(ticks[0]["price"]) + bump, PRICE_DECIMALS)
+    return dirty + [exact_duplicate, conflicting]
+
+
 def generate_ticks(rows: list[Row], ticks_per_day: int, rng: np.random.Generator) -> list[Row]:
     """Expand each clean daily candle into `ticks_per_day` individual trades.
 
@@ -370,15 +420,48 @@ def write_payload(
     rows: list[Row],
     columns: list[str],
     counts: dict[str, int],
+    formats: tuple[str, ...] = ("csv", "json", "jsonl", "xlsx"),
 ) -> None:
-    """Write one dataset as CSV, JSON, JSONL, and XLSX."""
-    for extension, writer in WRITERS.items():
+    """Write one dataset in the selected formats (default: all four)."""
+    for extension in formats:
+        writer = WRITERS[extension]
         if extension == "xlsx" and len(rows) > XLSX_MAX_ROWS:
             logger.warning("Skipping %s.xlsx: %d rows exceeds Excel limit", stem, len(rows))
             continue
         name = f"{stem}.{extension}"
         writer(rows, output_dir / name, columns)
         counts[name] = len(rows)
+
+
+def next_weekday_after(last_day: date) -> date:
+    """Return the next Mon–Fri calendar day after ``last_day``."""
+    candidate = last_day + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def log_catalog(instruments: list[Row], dates: list[date]) -> None:
+    """Log seeded (exchange, symbol) pairs and the next non-overlapping start date."""
+    logger.info("Canonical listings (must match seed_instruments / seed_market_data):")
+    for item in instruments:
+        logger.info(
+            "  %s @ %s  %s  %s/%s",
+            item["symbol"],
+            item["exchange"],
+            item["name"],
+            item["asset_class"],
+            item["currency"],
+        )
+    if dates:
+        nxt = next_weekday_after(dates[-1])
+        logger.info(
+            "Trading span %s .. %s (%d weekdays). Next non-duplicate --start-date=%s",
+            dates[0].isoformat(),
+            dates[-1].isoformat(),
+            len(dates),
+            nxt.isoformat(),
+        )
 
 
 def resolve_row_target(symbols: int, days: int, exponent: int | None, base: int) -> tuple[int, int]:
@@ -400,13 +483,20 @@ def generate(
     exponent: int | None = None,
     base: int = 10,
     ticks_per_day: int = 0,
+    formats: tuple[str, ...] = ("csv", "json", "jsonl", "xlsx"),
+    include_dirty: bool = True,
+    include_unexpected: bool = True,
 ) -> dict[str, int]:
     """Write clean, dirty, and optional tick fixtures; return row counts.
 
-    Clean and dirty market data, and ticks when requested, are written as CSV,
-    JSON, JSONL, and XLSX. With `exponent`, exactly base**exponent clean rows
-    are produced. File names are stamped with the UTC run time, e.g.
+    Clean and dirty market data, and ticks when requested, are written in the
+    selected formats. With `exponent`, exactly base**exponent clean rows are
+    produced. File names are stamped with the UTC run time, e.g.
     synthetic_market_clean_20261109T101500Z.csv.
+
+    Column names match ingestion default maps: daily ``exchange``/``symbol``/
+    ``date``/OHLCV, ticks ``trade_id``/``size`` → ``exchange_trade_id``/
+    ``quantity``. Listings match ``canonical_instruments()`` used by seeding.
     """
     resolved_seed = seed if seed is not None else secrets.randbits(32)
     logger.info("Using synthetic-data seed=%d", resolved_seed)
@@ -424,22 +514,48 @@ def generate(
         ) from exc
     volume_high = volume_ceiling(target_rows, ticks_per_day)
     rows = generate_rows(instruments, dates, rng, volume_high)[:target_rows]
-    dirty_rows = make_dirty_rows(rows, rng)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     counts: dict[str, int] = {}
-    write_payload(out, f"synthetic_market_clean_{run_stamp}", rows, COLUMNS, counts)
-    write_payload(out, f"synthetic_market_dirty_{run_stamp}", dirty_rows, COLUMNS, counts)
+    write_payload(
+        out, f"synthetic_market_clean_{run_stamp}", rows, COLUMNS, counts, formats=formats
+    )
+    if include_dirty:
+        dirty_rows = make_dirty_rows(rows, rng)
+        write_payload(
+            out,
+            f"synthetic_market_dirty_{run_stamp}",
+            dirty_rows,
+            COLUMNS,
+            counts,
+            formats=formats,
+        )
     if ticks_per_day > 0:
         ticks = generate_ticks(rows, ticks_per_day, rng)
-        write_payload(out, f"synthetic_ticks_{run_stamp}", ticks, TICK_COLUMNS, counts)
+        write_payload(
+            out, f"synthetic_ticks_{run_stamp}", ticks, TICK_COLUMNS, counts, formats=formats
+        )
+        if include_dirty:
+            dirty_ticks = make_dirty_ticks(ticks, rng)
+            write_payload(
+                out,
+                f"synthetic_ticks_dirty_{run_stamp}",
+                dirty_ticks,
+                TICK_COLUMNS,
+                counts,
+                formats=formats,
+            )
 
-    # Unexpected extra column appended to an otherwise valid subset.
-    unexpected = [dict(row, unexpected_extra="ignore-me") for row in rows[: max(len(rows) // 4, 1)]]
-    name = f"synthetic_market_unexpected_columns_{run_stamp}.csv"
-    counts[name] = len(unexpected)
-    write_csv(unexpected, out / name, columns=COLUMNS + ["unexpected_extra"])
+    if include_unexpected:
+        # Unexpected extra column appended to an otherwise valid subset.
+        unexpected = [
+            dict(row, unexpected_extra="ignore-me") for row in rows[: max(len(rows) // 4, 1)]
+        ]
+        name = f"synthetic_market_unexpected_columns_{run_stamp}.csv"
+        counts[name] = len(unexpected)
+        write_csv(unexpected, out / name, columns=COLUMNS + ["unexpected_extra"])
+    log_catalog(instruments, dates)
     return counts
 
 
@@ -454,12 +570,16 @@ class Args(argparse.Namespace):
     seed: int | None = None
     output_dir: Path = Path("sample_data")
     start_date: str = "2024-01-02"
+    formats: list[str] = ["csv", "json", "jsonl", "xlsx"]
+    no_dirty: bool = False
+    no_unexpected: bool = False
 
 
 def parse_args(argv: list[str] | None = None) -> Args:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate synthetic OHLCV and tick fixtures in CSV, JSON, JSONL, and XLSX."
+            "Generate synthetic OHLCV and tick fixtures aligned with MDA "
+            "Instrument/DailyOHLCV/Trade column maps."
         )
     )
     _ = parser.add_argument(
@@ -508,7 +628,27 @@ def parse_args(argv: list[str] | None = None) -> Args:
         "--start-date",
         type=str,
         default="2024-01-02",
-        help="first trading date, YYYY-MM-DD (default: 2024-01-02)",
+        help=(
+            "first trading date, YYYY-MM-DD (default: 2024-01-02). "
+            "Advance past the last stored candle to avoid OHLCV/trade duplicates."
+        ),
+    )
+    _ = parser.add_argument(
+        "--formats",
+        nargs="+",
+        choices=sorted(WRITERS),
+        default=["csv", "json", "jsonl", "xlsx"],
+        help="output formats (default: csv json jsonl xlsx). Use: --formats csv",
+    )
+    _ = parser.add_argument(
+        "--no-dirty",
+        action="store_true",
+        help="skip dirty OHLCV/tick fixtures (clean-only ingestion runs)",
+    )
+    _ = parser.add_argument(
+        "--no-unexpected",
+        action="store_true",
+        help="skip the unexpected-columns CSV fixture",
     )
     return parser.parse_args(argv, namespace=Args())
 
@@ -526,6 +666,9 @@ def main(argv: list[str] | None = None) -> int:
         exponent=args.exponent,
         base=args.base,
         ticks_per_day=args.ticks_per_day,
+        formats=tuple(args.formats),
+        include_dirty=not args.no_dirty,
+        include_unexpected=not args.no_unexpected,
     )
     total = sum(counts.values())
     logger.info(
@@ -533,6 +676,10 @@ def main(argv: list[str] | None = None) -> int:
         len(counts),
         total,
         args.output_dir,
+    )
+    logger.info(
+        "Ingestion patterns: synthetic_market_clean_*.csv  synthetic_ticks_*.csv  "
+        "(leave dirty fixtures out of the rule pattern or use --no-dirty)"
     )
     return 0
 

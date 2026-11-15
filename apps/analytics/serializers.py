@@ -405,3 +405,84 @@ class AggregationRunSerializer(serializers.ModelSerializer):
             "finished_at",
             "updated_at",
         )
+
+
+class OverviewFilterSerializer(serializers.Serializer):
+    """Combined analytics overview filters. Reuses existing calculation services."""
+
+    instrument_id = serializers.IntegerField(required=False, min_value=1)
+    instrument_symbol = serializers.CharField(required=False, allow_blank=False)
+    instrument_name = serializers.CharField(required=False, allow_blank=False)
+    exchange_id = serializers.IntegerField(required=False, min_value=1)
+    exchange_code = serializers.CharField(required=False, allow_blank=False)
+    portfolio_id = serializers.UUIDField(required=False)
+    metrics = serializers.CharField(required=False)
+    timeframe = serializers.ChoiceField(choices=CandleTimeframe.choices, required=False)
+    start = serializers.DateTimeField(required=False)
+    end = serializers.DateTimeField(required=False)
+    start_date = serializers.DateField(required=False)
+    end_date = serializers.DateField(required=False)
+    include_incomplete = serializers.BooleanField(required=False, default=False)
+    return_type = serializers.ChoiceField(
+        choices=("simple", "log"), required=False, default="simple"
+    )
+    window = serializers.IntegerField(
+        required=False,
+        default=DEFAULT_WINDOW,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+    std_multiplier = serializers.FloatField(
+        required=False,
+        default=DEFAULT_BOLLINGER_MULTIPLIER,
+        min_value=MIN_BOLLINGER_MULTIPLIER,
+        max_value=MAX_BOLLINGER_MULTIPLIER,
+    )
+    fast_period = serializers.IntegerField(
+        required=False,
+        default=MACD_DEFAULT_FAST,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+    slow_period = serializers.IntegerField(
+        required=False,
+        default=MACD_DEFAULT_SLOW,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+    signal_period = serializers.IntegerField(
+        required=False,
+        default=MACD_DEFAULT_SIGNAL,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+    stochastic_signal = serializers.IntegerField(
+        required=False,
+        default=DEFAULT_STOCHASTIC_SIGNAL,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+
+    def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        from apps.analytics.services.overview import CANDLE_METRICS, parse_metrics
+
+        _reject_dual_exchange(attrs)
+        _reject_dual_instrument(attrs)
+        _require_analytics_scope(attrs)
+        _validate_indicator_range(attrs)
+        raw_metrics = attrs.get("metrics")
+        metrics = parse_metrics(raw_metrics if isinstance(raw_metrics, str) else None)
+        if metrics is None:
+            raise serializers.ValidationError({"metrics": ["Unsupported or empty metrics list."]})
+        attrs["parsed_metrics"] = metrics
+        if CANDLE_METRICS.intersection(metrics) and attrs.get("timeframe") is None:
+            raise serializers.ValidationError(
+                {"timeframe": ["timeframe is required for candle-based metrics."]}
+            )
+        fast = attrs.get("fast_period")
+        slow = attrs.get("slow_period")
+        if isinstance(fast, int) and isinstance(slow, int) and fast >= slow:
+            raise serializers.ValidationError(
+                {"fast_period": ["fast_period must be less than slow_period."]}
+            )
+        return attrs
