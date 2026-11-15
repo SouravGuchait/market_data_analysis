@@ -375,6 +375,10 @@ def test_corrected_candle_is_recalculated_on_next_read(auth_client, instrument, 
     candles[3].close = Decimal(10)
     candles[3].high = Decimal(10)
     candles[3].save(update_fields=["close", "high"])
+    # Direct candle edits must invalidate like aggregation (Feature 015).
+    from apps.common.cache_service import bump_market_version
+
+    bump_market_version()
     after = _points(_results(auth_client.get(SMA_URL, params))[0]["results"])
     assert after[2]["value"] == 2
     _close(after[3]["value"], 5)

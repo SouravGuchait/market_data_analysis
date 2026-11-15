@@ -429,6 +429,9 @@ def test_corrected_candle_recalculated_on_next_read(auth_client, instrument, exc
     candles[3].low = Decimal(10)
     candles[3].open = Decimal(10)
     candles[3].save(update_fields=["close", "high", "low", "open"])
+    from apps.common.cache_service import bump_market_version
+
+    bump_market_version()
     after = _bands(_results(auth_client.get(BOLLINGER_URL, params))[0]["results"])
     _close(after[2]["middle"], 2)
     _close(after[3]["middle"], 5)

@@ -206,7 +206,20 @@ def bulk_attach_instruments(
 ) -> BulkAttachResult:
     """Validate every item, then create and attach inside one transaction."""
 
+    from apps.common.cache_service import (
+        after_commit,
+        bump_catalog_version,
+        bump_portfolio_detail_version,
+    )
+
     _reject_invalid(items, create_if_missing=create_if_missing)
     locked = Portfolio.objects.select_for_update().get(pk=portfolio.pk)
     lines = [_attach_one(locked, item, create_if_missing=create_if_missing) for item in items]
+    owner_pk = locked.owner.pk
+    portfolio_id = locked.pk
+    created_instruments = any(line.instrument_created for line in lines)
+    if isinstance(owner_pk, int):
+        after_commit(lambda: bump_portfolio_detail_version(owner_pk, portfolio_id))
+    if created_instruments:
+        after_commit(bump_catalog_version)
     return BulkAttachResult(portfolio_id=locked.pk, summary=_summary(lines), lines=lines)

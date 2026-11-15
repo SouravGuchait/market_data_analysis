@@ -126,6 +126,10 @@ def finalize_ingestion(ingestion: Ingestion) -> Ingestion:
         },
     )
     release_successful_files(ingestion)
+    if ingestion.accepted_rows > 0:
+        from apps.common.cache_service import bump_market_version
+
+        bump_market_version()
     _maybe_schedule_aggregation(ingestion)
     return ingestion
 

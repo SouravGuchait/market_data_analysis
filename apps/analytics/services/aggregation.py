@@ -160,6 +160,8 @@ def mark_run_running(run: AggregationRun) -> AggregationRun:
 
 
 def mark_run_succeeded(run: AggregationRun, totals: AggregationTotals) -> AggregationRun:
+    from apps.common.cache_service import bump_market_version
+
     run.status = AggregationRunStatus.SUCCEEDED
     run.finished_at = timezone.now()
     run.candles_created = totals.created
@@ -177,6 +179,7 @@ def mark_run_succeeded(run: AggregationRun, totals: AggregationTotals) -> Aggreg
             "updated_at",
         ]
     )
+    bump_market_version()
     return run
 
 

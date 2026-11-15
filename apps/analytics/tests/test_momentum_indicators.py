@@ -406,6 +406,9 @@ def test_corrected_candle_recalculated_on_next_read(auth_client, instrument, exc
     candles[3].low = Decimal(9)
     candles[3].open = Decimal(9)
     candles[3].save(update_fields=["close", "high", "low", "open"])
+    from apps.common.cache_service import bump_market_version
+
+    bump_market_version()
     after = _points(_results(auth_client.get(RSI_URL, params))[0]["results"])
     _close(after[2]["value"], 100.0 - (100.0 / 3.0))
     assert after[3]["value"] != before[3]["value"]

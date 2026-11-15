@@ -99,7 +99,8 @@ jobs:
             apps/market_data/tests/test_models.py \
             apps/instruments/tests/test_serializers.py \
             apps/portfolios/tests/test_portfolio_models.py \
-            apps/audit/tests/test_audit_recording.py
+            apps/audit/tests/test_audit_recording.py \
+            apps/common/tests/test_cache_service.py
 
       - name: API tests
         run: |
@@ -109,6 +110,7 @@ jobs:
             apps/portfolios/tests/test_portfolio_api.py \
             apps/portfolios/tests/test_portfolio_instrument_api.py \
             apps/portfolios/tests/test_bulk_attach.py \
+            apps/portfolios/tests/test_cache_isolation.py \
             apps/audit/tests/test_audit_api.py \
             apps/ingestion/tests/test_user_ingestion_api.py
 
@@ -120,6 +122,7 @@ jobs:
             apps/portfolios/tests/test_portfolio_api.py \
             apps/portfolios/tests/test_portfolio_instrument_api.py \
             apps/portfolios/tests/test_bulk_attach.py \
+            apps/portfolios/tests/test_cache_isolation.py \
             apps/audit/tests/test_audit_api.py \
             apps/ingestion/tests/test_user_ingestion_api.py
 
@@ -157,6 +160,13 @@ jobs:
 
       - name: Drawdown tests
         run: .venv/bin/python -m pytest -q apps/analytics/tests/test_drawdown.py
+
+      - name: Response cache tests
+        run: |
+          .venv/bin/python -m pytest -q \
+            apps/common/tests/test_cache_service.py \
+            apps/portfolios/tests/test_cache_isolation.py \
+            apps/analytics/tests/test_cache.py
 
       - name: Redis and Celery tests
         run: |

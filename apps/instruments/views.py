@@ -13,6 +13,13 @@ from rest_framework.views import APIView
 
 from apps.audit.models import AuditAction, AuditResourceType, AuditStatus
 from apps.audit.services import record_audit_event
+from apps.common.cache_service import (
+    after_commit,
+    bump_catalog_version,
+    catalog_key,
+    get_or_build,
+    ttl_catalog,
+)
 from apps.common.pagination import StandardResultsPagination
 from apps.instruments.models import Instrument
 from apps.instruments.selectors import list_instruments
@@ -81,15 +88,26 @@ class InstrumentListCreateView(APIView):
         filters = InstrumentFilterSerializer(data=request.query_params)
         if not filters.is_valid():
             return failure("Validation failed", filters.errors)
-        paginator = StandardResultsPagination()
-        page = paginator.paginate_queryset(
-            list_instruments(_string_filters(filters.validated_data)), request, view=self
-        )
-        serializer = InstrumentReadSerializer(page, many=True)
-        return success(
-            "Instruments retrieved",
-            paginator.get_paginated_response(serializer.data).data,
-        )
+        filter_parts = _string_filters(filters.validated_data)
+        parts: dict[str, object] = {
+            **filter_parts,
+            "page": request.query_params.get("page", "1"),
+            "page_size": request.query_params.get("page_size", ""),
+        }
+        key = catalog_key("instruments", parts)
+
+        def build() -> dict[str, object]:
+            paginator = StandardResultsPagination()
+            page = paginator.paginate_queryset(list_instruments(filter_parts), request, view=self)
+            serializer = InstrumentReadSerializer(page, many=True)
+            return {
+                "success": True,
+                "message": "Instruments retrieved",
+                "data": paginator.get_paginated_response(serializer.data).data,
+                "errors": None,
+            }
+
+        return Response(get_or_build(key, ttl_catalog(), build))
 
     @extend_schema(tags=["instruments"], request=InstrumentWriteSerializer)
     def post(self, request: Request) -> Response:
@@ -120,6 +138,7 @@ class InstrumentListCreateView(APIView):
                 {"symbol": ["This symbol already exists on the selected exchange."]},
             )
         stored = Instrument.objects.select_related("exchange").get(pk=instrument.pk)
+        after_commit(bump_catalog_version)
         return success(
             "Instrument created",
             InstrumentReadSerializer(stored).data,
