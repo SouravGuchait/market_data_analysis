@@ -1,14 +1,17 @@
-"""HTTP endpoints for candles, daily returns, and aggregation runs."""
+"""HTTP endpoints for candles, daily returns, trend indicators, and aggregation runs."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
 from django.contrib.auth.base_user import AbstractBaseUser
 from django.db.models import Model, QuerySet
 from django.http import JsonResponse
+from drf_spectacular.utils import extend_schema
 from rest_framework import serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
@@ -17,23 +20,44 @@ from rest_framework.views import APIView
 
 from apps.analytics.models import AggregationTrigger
 from apps.analytics.scope import failure, resolve_scope
-from apps.analytics.selectors import get_aggregation_run, list_candles, list_daily_ohlcv
+from apps.analytics.selectors import (
+    IndicatorCandleQuery,
+    get_aggregation_run,
+    list_candles,
+    list_daily_ohlcv,
+)
 from apps.analytics.serializers import (
     AggregationCreateSerializer,
     AggregationRunSerializer,
     CandleFilterSerializer,
     CandleReadSerializer,
+    MacdIndicatorFilterSerializer,
     ReturnsFilterSerializer,
+    WindowIndicatorFilterSerializer,
 )
 from apps.analytics.services.dispatch import (
     AggregationRequest,
     create_aggregation_run,
     schedule_run_on_commit,
 )
-from apps.analytics.services.metrics_calculator import build_returns_series
+from apps.analytics.services.metrics_calculator import (
+    IndicatorSeries,
+    MacdSeries,
+    build_returns_series,
+)
+from apps.analytics.services.trend import (
+    IndicatorLimitError,
+    MacdIndicatorQuery,
+    WindowIndicatorQuery,
+    build_ema_series,
+    build_macd_series,
+    build_sma_series,
+)
 from apps.common.pagination import StandardResultsPagination
 from apps.exchanges.models import Exchange
 from apps.instruments.models import Instrument
+
+logger = logging.getLogger(__name__)
 
 
 def _mapping(value: object) -> dict[str, object]:
@@ -160,6 +184,190 @@ class ReturnsListView(APIView):
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
         return _returns_from_scope(request, _mapping(filters.validated_data))
+
+
+@dataclass(frozen=True)
+class _Scope:
+    instrument_ids: list[int]
+    exchange_ids: list[int] | None
+
+
+def _int_field(data: dict[str, object], key: str) -> int | None:
+    value = data.get(key)
+    if isinstance(value, int):
+        return value
+    return None
+
+
+def _text_field(data: dict[str, object], key: str) -> str | None:
+    value = data.get(key)
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _dt_field(data: dict[str, object], key: str) -> datetime | None:
+    value = data.get(key)
+    if isinstance(value, datetime):
+        return value
+    return None
+
+
+def _scoped_ids(request: Request, data: dict[str, object]) -> _Scope | Response:
+    instrument_ids, exchange_ids, error = resolve_scope(_user(request), data)
+    if error is not None:
+        return error
+    return _Scope(instrument_ids or [], exchange_ids)
+
+
+def _candle_query(data: dict[str, object], scope: _Scope, timeframe: str) -> IndicatorCandleQuery:
+    return IndicatorCandleQuery(
+        instrument_ids=scope.instrument_ids,
+        exchange_ids=scope.exchange_ids,
+        timeframe=timeframe,
+        range_start=_dt_field(data, "start"),
+        range_end=_dt_field(data, "end"),
+        include_incomplete=data.get("include_incomplete") is True,
+    )
+
+
+def _window_query(data: dict[str, object], scope: _Scope) -> WindowIndicatorQuery | None:
+    timeframe = _text_field(data, "timeframe")
+    window = _int_field(data, "window")
+    if timeframe is None or window is None:
+        return None
+    return WindowIndicatorQuery(candles=_candle_query(data, scope, timeframe), window=window)
+
+
+def _log_indicator(request: Request, metric: str, timeframe: str, series_count: int) -> None:
+    logger.info(
+        "Computed trend indicator.",
+        extra={
+            "user_id": request.user.pk,
+            "metric": metric,
+            "timeframe": timeframe,
+            "series_count": series_count,
+        },
+    )
+
+
+def _window_outcome(
+    data: dict[str, object],
+    scope: _Scope,
+    metric: str,
+) -> Response | tuple[WindowIndicatorQuery, list[IndicatorSeries]]:
+    query = _window_query(data, scope)
+    if query is None:
+        return failure(f"Invalid {metric} filters", {"detail": ["Invalid indicator parameters."]})
+    outcome = build_sma_series(query) if metric == "sma" else build_ema_series(query)
+    if isinstance(outcome, IndicatorLimitError):
+        return failure(outcome.message, outcome.errors)
+    return query, outcome
+
+
+def _prepare_window(
+    request: Request,
+    metric: str,
+) -> Response | tuple[WindowIndicatorQuery, list[IndicatorSeries]]:
+    filters = WindowIndicatorFilterSerializer(data=request.query_params)
+    if not filters.is_valid():
+        return failure(f"Invalid {metric} filters", filters.errors)
+    scope = _scoped_ids(request, _mapping(filters.validated_data))
+    if isinstance(scope, Response):
+        return scope
+    return _window_outcome(_mapping(filters.validated_data), scope, metric)
+
+
+def window_indicator_response(request: Request, *, metric: str, message: str) -> Response:
+    prepared = _prepare_window(request, metric)
+    if isinstance(prepared, Response):
+        return prepared
+    query, outcome = prepared
+    _log_indicator(request, metric, query.candles.timeframe, len(outcome))
+    return success(message, {"count": len(outcome), "results": outcome})
+
+
+def _macd_query(data: dict[str, object], scope: _Scope) -> MacdIndicatorQuery | None:
+    timeframe = _text_field(data, "timeframe")
+    fast = _int_field(data, "fast_period")
+    slow = _int_field(data, "slow_period")
+    signal = _int_field(data, "signal_period")
+    if timeframe is None or fast is None or slow is None or signal is None:
+        return None
+    return MacdIndicatorQuery(
+        candles=_candle_query(data, scope, timeframe),
+        fast_period=fast,
+        slow_period=slow,
+        signal_period=signal,
+    )
+
+
+def _macd_outcome(
+    data: dict[str, object],
+    scope: _Scope,
+) -> Response | tuple[MacdIndicatorQuery, list[MacdSeries]]:
+    query = _macd_query(data, scope)
+    if query is None:
+        return failure("Invalid macd filters", {"detail": ["Invalid indicator parameters."]})
+    outcome = build_macd_series(query)
+    if isinstance(outcome, IndicatorLimitError):
+        return failure(outcome.message, outcome.errors)
+    return query, outcome
+
+
+def _prepare_macd(
+    request: Request,
+) -> Response | tuple[MacdIndicatorQuery, list[MacdSeries]]:
+    filters = MacdIndicatorFilterSerializer(data=request.query_params)
+    if not filters.is_valid():
+        return failure("Invalid macd filters", filters.errors)
+    data = _mapping(filters.validated_data)
+    scope = _scoped_ids(request, data)
+    if isinstance(scope, Response):
+        return scope
+    return _macd_outcome(data, scope)
+
+
+def macd_indicator_response(request: Request) -> Response:
+    prepared = _prepare_macd(request)
+    if isinstance(prepared, Response):
+        return prepared
+    query, outcome = prepared
+    _log_indicator(request, "macd", query.candles.timeframe, len(outcome))
+    return success("MACD retrieved", {"count": len(outcome), "results": outcome})
+
+
+class SmaListView(APIView):
+    """SMA of trade-derived candle closes. Ordinary GETs are not audit events."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[WindowIndicatorFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> Response:
+        return window_indicator_response(request, metric="sma", message="SMA retrieved")
+
+
+class EmaListView(APIView):
+    """EMA of trade-derived candle closes, seeded with the first full-window SMA."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[WindowIndicatorFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> Response:
+        return window_indicator_response(request, metric="ema", message="EMA retrieved")
+
+
+class MacdListView(APIView):
+    """MACD, signal, and histogram from trade-derived candle closes."""
+
+    permission_classes = [IsAuthenticated]
+    throttle_scope = "analytics_read"
+
+    @extend_schema(parameters=[MacdIndicatorFilterSerializer], tags=["analytics"])
+    def get(self, request: Request) -> Response:
+        return macd_indicator_response(request)
 
 
 def _as_optional_int(value: object) -> int | None:

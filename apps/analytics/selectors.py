@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
@@ -120,3 +121,63 @@ def list_daily_ohlcv(
 
 def get_aggregation_run(run_id: UUID) -> AggregationRun | None:
     return AggregationRun.objects.filter(pk=run_id).first()
+
+
+@dataclass(frozen=True)
+class IndicatorCandleQuery:
+    """Filters for one trade-derived candle series used by trend indicators."""
+
+    instrument_ids: Sequence[int]
+    exchange_ids: Sequence[int] | None
+    timeframe: str
+    range_start: datetime | None
+    range_end: datetime | None
+    include_incomplete: bool
+
+
+def list_indicator_candles(query: IndicatorCandleQuery) -> QuerySet[Candle]:
+    """Return event-time-sorted candles for one timeframe and instrument set."""
+
+    queryset = Candle.objects.select_related("instrument", "instrument__exchange").filter(
+        instrument_id__in=list(query.instrument_ids),
+        timeframe=query.timeframe,
+    )
+    if query.exchange_ids is not None:
+        queryset = queryset.filter(exchange_id__in=list(query.exchange_ids))
+    if not query.include_incomplete:
+        queryset = queryset.filter(is_complete=True)
+    if query.range_start is not None:
+        queryset = queryset.filter(bucket_start__gte=query.range_start)
+    if query.range_end is not None:
+        queryset = queryset.filter(bucket_start__lte=query.range_end)
+    return queryset.order_by("instrument_id", "bucket_start", "id")
+
+
+def _lookback_queryset(
+    query: IndicatorCandleQuery, instrument_id: int, before: datetime
+) -> QuerySet[Candle]:
+    queryset = Candle.objects.filter(
+        instrument_id=instrument_id,
+        timeframe=query.timeframe,
+        bucket_start__lt=before,
+    )
+    if query.exchange_ids is not None:
+        queryset = queryset.filter(exchange_id__in=list(query.exchange_ids))
+    if not query.include_incomplete:
+        queryset = queryset.filter(is_complete=True)
+    return queryset.order_by("-bucket_start", "-id")
+
+
+def indicator_lookback_candles(
+    query: IndicatorCandleQuery,
+    instrument_id: int,
+    limit: int,
+) -> list[Candle]:
+    """Return up to ``limit`` candles immediately before ``query.range_start``."""
+
+    start = query.range_start
+    if start is None or limit <= 0:
+        return []
+    rows = list(_lookback_queryset(query, instrument_id, start)[:limit])
+    rows.reverse()
+    return rows

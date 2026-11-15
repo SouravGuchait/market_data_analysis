@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), and **Candle aggregation with daily returns** (Feature 008). Advanced indicators remain future work (Features 009+).
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), and **SMA, EMA, and MACD** (Feature 009). Volatility, momentum, volume, price-action, and statistical indicators remain future work (Features 010+).
 
 ## Implemented features
 
@@ -629,6 +629,49 @@ Automated tests:
 python -m pytest apps/analytics/tests/ -q
 ```
 
+### Feature 009: Trend indicators (SMA, EMA, MACD)
+
+Feature 009 calculates SMA, EMA, and MACD from persisted trade-derived `Candle`
+closes. Imported `DailyOHLCV` remains the source for `/api/v1/analytics/returns/`
+and is not used here. Indicators are computed on each read, so a candle corrected
+by a late tick is reflected on the next request. Values are not stored.
+
+| Method | Endpoint | Purpose |
+| ------ | -------- | ------- |
+| GET | `/api/v1/analytics/sma/` | Simple moving average of candle closes. |
+| GET | `/api/v1/analytics/ema/` | Exponential moving average, seeded with the first full-window SMA. |
+| GET | `/api/v1/analytics/macd/` | MACD line, signal EMA, and histogram. |
+
+All three require JWT authentication and the `analytics_read` throttle. They use
+the same scope filters as returns: `instrument_id`, or `instrument_symbol` /
+`instrument_name` (plus `exchange_code` or `exchange_id` when the name or symbol
+is ambiguous), or `portfolio_id`. A portfolio belonging to another user returns
+404. Shared candle history is readable by any authenticated user; the portfolio
+filter only limits which instruments are included.
+
+`timeframe` is required (`1m`, `5m`, `15m`, `30m`, `1h`, `1d`). One request uses
+one timeframe. `start` and `end` are timezone-aware event times. When both are
+sent, `end` must be on or after `start` and the span must not exceed 3,660 days.
+A single response reads at most 10,000 in-range candles.
+
+SMA and EMA accept `window` from 2 through 500. The default is 20. MACD accepts
+`fast_period`, `slow_period`, and `signal_period` in that same range. Defaults
+are 12, 26, and 9, and the fast period must be shorter than the slow period.
+`include_incomplete` defaults to false, so open candles are left out of both the
+result and the warm-up window. Set it to `true` to include them.
+
+Warm-up values are JSON `null`. They are not zero. When `start` is set, earlier
+candles are used only as calculation context and are omitted from `results`.
+SMA/EMA output is a price. MACD output is a price difference. Presentation uses
+IEEE-754 floats; intermediate formula steps are not rounded to a fixed number of
+decimals. These GET requests are not audit events.
+
+```http
+GET /api/v1/analytics/sma/?instrument_symbol=ACME&exchange_code=XNYS&timeframe=1d&window=20
+GET /api/v1/analytics/ema/?instrument_name=Acme%20Industrial&exchange_code=XNYS&timeframe=1h&window=12
+GET /api/v1/analytics/macd/?instrument_symbol=ACME&exchange_code=XNYS&timeframe=1d
+```
+
 ### Feature 005: User file management and ingestion dispatch
 
 Users upload into the local drop folder or S3. The system copies a matched file
@@ -974,8 +1017,8 @@ not required for that resolution.
 .
 ├── apps/
 │   ├── accounts/          # Custom user model
-│   ├── analytics/         # Candle aggregation runs, returns API, metrics helpers
-│   │   ├── services/      # Aggregation, dispatch, metrics_calculator
+│   ├── analytics/         # Candle aggregation, returns, and trend indicators
+│   │   ├── services/      # Aggregation, dispatch, metrics_calculator, trend
 │   │   └── tasks.py       # process_aggregation_run Celery task
 │   ├── audit/             # Append-only user and system audit records
 │   ├── common/            # Health, logging and middleware

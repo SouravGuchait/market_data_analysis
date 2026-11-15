@@ -1,8 +1,16 @@
-"""Canonical analytical metric helpers for Feature 008 and later metrics."""
+"""Canonical analytical metric helpers for Feature 008 and later metrics.
+
+Trend indicators (Feature 009) use trade-derived candle closes. They are computed
+on read from the closes passed in, so a corrected candle is reflected on the next
+request. Invalid closes (non-finite or not positive) are omitted from the window
+and do not advance EMA or MACD state. There is no look-ahead: index ``t`` uses
+only closes at or before ``t``.
+"""
 
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -233,3 +241,281 @@ def build_returns_series(
             )
         )
     return series
+
+
+MIN_INDICATOR_PERIOD = 2
+MAX_INDICATOR_PERIOD = 500
+DEFAULT_WINDOW = 20
+MACD_DEFAULT_FAST = 12
+MACD_DEFAULT_SLOW = 26
+MACD_DEFAULT_SIGNAL = 9
+MAX_INDICATOR_CANDLES = 10_000
+MAX_INDICATOR_RANGE_DAYS = 3_660
+
+SMA_INITIALIZATION = (
+    "SMA is the arithmetic mean of the last full window of valid closes. "
+    "The value is null until that many valid closes exist."
+)
+EMA_INITIALIZATION = (
+    "EMA is seeded with the SMA of the first full window of valid closes, "
+    "then EMA_t = alpha*close_t + (1-alpha)*EMA_(t-1) with alpha = 2/(n+1)."
+)
+MACD_INITIALIZATION = (
+    "MACD is the fast EMA minus the slow EMA. The signal line is an EMA of the "
+    "MACD line, seeded with the SMA of the first signal-period MACD values. "
+    "Histogram is MACD minus signal and is null until the signal exists."
+)
+
+
+class EventRange(TypedDict):
+    start: str | None
+    end: str | None
+
+
+class WindowParameters(TypedDict):
+    window: int
+    include_incomplete: bool
+
+
+class MacdParameters(TypedDict):
+    fast_period: int
+    slow_period: int
+    signal_period: int
+    include_incomplete: bool
+
+
+class IndicatorObservation(TypedDict):
+    timestamp: str
+    close: str
+    value: float | None
+
+
+class MacdObservation(TypedDict):
+    timestamp: str
+    close: str
+    macd: float | None
+    signal: float | None
+    histogram: float | None
+
+
+class IndicatorSeries(TypedDict):
+    metric: str
+    timeframe: str
+    source: str
+    instrument: InstrumentRef
+    exchange: ExchangeRef
+    parameters: WindowParameters
+    requested_range: EventRange
+    lookback_requirement: str
+    incomplete_policy: str
+    initialization: str
+    input_field: str
+    output_unit: str
+    data_availability: DataAvailability
+    results: list[IndicatorObservation]
+
+
+class MacdSeries(TypedDict):
+    metric: str
+    timeframe: str
+    source: str
+    instrument: InstrumentRef
+    exchange: ExchangeRef
+    parameters: MacdParameters
+    requested_range: EventRange
+    lookback_requirement: str
+    incomplete_policy: str
+    initialization: str
+    input_field: str
+    output_unit: str
+    data_availability: DataAvailability
+    results: list[MacdObservation]
+
+
+@dataclass(frozen=True)
+class MacdValue:
+    """One MACD observation in price units."""
+
+    macd: float | None
+    signal: float | None
+    histogram: float | None
+
+
+@dataclass
+class _EmaState:
+    window: int
+    alpha: float
+    require_positive: bool
+    seed: list[float]
+    previous: float | None
+
+
+@dataclass(frozen=True)
+class _EmaStep:
+    value: float | None
+    previous: float | None
+    clear_seed: bool
+
+
+def _require_period(window: int, name: str) -> None:
+    if window < MIN_INDICATOR_PERIOD or window > MAX_INDICATOR_PERIOD:
+        raise ValueError(
+            f"{name} period must be between {MIN_INDICATOR_PERIOD} and {MAX_INDICATOR_PERIOD}."
+        )
+
+
+def _accepted_value(value: float | None, *, require_positive: bool) -> float | None:
+    if value is None or not math.isfinite(value):
+        return None
+    if require_positive and value <= 0:
+        return None
+    return value
+
+
+def sma_series(closes: Sequence[float | None], window: int) -> list[float | None]:
+    """Full-window simple moving average of valid closes.
+
+    Input is close, already ordered by event time. Output is in price units.
+    A null is returned until ``window`` valid closes have been seen. Invalid
+    closes do not enter the window. No intermediate rounding is applied.
+    """
+
+    _require_period(window, "SMA")
+    values: list[float | None] = []
+    bucket: deque[float] = deque()
+    total = 0.0
+    for close in closes:
+        accepted = _accepted_value(close, require_positive=True)
+        if accepted is None:
+            values.append(None)
+            continue
+        bucket.append(accepted)
+        total += accepted
+        if len(bucket) > window:
+            total -= bucket.popleft()
+        values.append(None if len(bucket) < window else total / window)
+    return values
+
+
+def _seed_ema(accepted: float, state: _EmaState) -> _EmaStep:
+    state.seed.append(accepted)
+    if len(state.seed) < state.window:
+        return _EmaStep(None, None, False)
+    initial = sum(state.seed) / state.window
+    return _EmaStep(initial, initial, True)
+
+
+def _ema_step(value: float | None, state: _EmaState) -> _EmaStep:
+    accepted = _accepted_value(value, require_positive=state.require_positive)
+    if accepted is None:
+        return _EmaStep(None, state.previous, False)
+    if state.previous is not None:
+        updated = state.alpha * accepted + (1.0 - state.alpha) * state.previous
+        return _EmaStep(updated, updated, False)
+    return _seed_ema(accepted, state)
+
+
+def ema_series(
+    closes: Sequence[float | None],
+    window: int,
+    *,
+    require_positive: bool = True,
+) -> list[float | None]:
+    """Exponential moving average seeded with the first full-window SMA.
+
+    ``require_positive`` is for price series. The MACD signal passes
+    ``require_positive=False`` so negative MACD values still update the EMA.
+    Invalid observations do not advance state. Output uses the input unit.
+    """
+
+    _require_period(window, "EMA")
+    state = _EmaState(
+        window=window,
+        alpha=2.0 / (window + 1),
+        require_positive=require_positive,
+        seed=[],
+        previous=None,
+    )
+    values: list[float | None] = []
+    for close in closes:
+        step = _ema_step(close, state)
+        values.append(step.value)
+        state.previous = step.previous
+        if step.clear_seed:
+            state.seed.clear()
+    return values
+
+
+def _macd_value(macd: float | None, signal: float | None) -> MacdValue:
+    if macd is None or signal is None:
+        return MacdValue(macd, signal, None)
+    return MacdValue(macd, signal, macd - signal)
+
+
+def _macd_line(
+    fast_ema: Sequence[float | None], slow_ema: Sequence[float | None]
+) -> list[float | None]:
+    line: list[float | None] = []
+    for fast_value, slow_value in zip(fast_ema, slow_ema, strict=True):
+        if fast_value is None or slow_value is None:
+            line.append(None)
+            continue
+        line.append(fast_value - slow_value)
+    return line
+
+
+def macd_series(
+    closes: Sequence[float | None],
+    *,
+    fast: int,
+    slow: int,
+    signal: int,
+) -> list[MacdValue]:
+    """MACD line, signal, and histogram from close prices.
+
+    Fast, slow, and signal periods follow the documented EMA rules. The fast
+    period must be shorter than the slow period. Histogram is null until the
+    signal EMA is initialized. Values are price differences, not returns.
+    """
+
+    _require_period(fast, "MACD fast")
+    _require_period(slow, "MACD slow")
+    _require_period(signal, "MACD signal")
+    if fast >= slow:
+        raise ValueError("MACD fast period must be shorter than the slow period.")
+    fast_ema = ema_series(closes, fast)
+    slow_ema = ema_series(closes, slow)
+    line = _macd_line(fast_ema, slow_ema)
+    signal_line = ema_series(line, signal, require_positive=False)
+    return [
+        _macd_value(macd, signal_value)
+        for macd, signal_value in zip(line, signal_line, strict=True)
+    ]
+
+
+def window_lookback(window: int) -> int:
+    """Prior closes needed before the first in-range SMA or EMA can be non-null."""
+
+    return window - 1
+
+
+def macd_lookback(slow: int, signal: int) -> int:
+    """Prior closes needed before the first in-range histogram can be non-null."""
+
+    return slow + signal - 2
+
+
+def window_lookback_text(window: int) -> str:
+    prior = window_lookback(window)
+    return (
+        f"{window} valid closes are required. When start is set, up to {prior} earlier "
+        "candles are calculation context and are omitted from results."
+    )
+
+
+def macd_lookback_text(slow: int, signal: int) -> str:
+    prior = macd_lookback(slow, signal)
+    return (
+        f"Slow EMA {slow} and signal EMA {signal} must initialize. When start is set, "
+        f"up to {prior} earlier candles are calculation context and are omitted from results."
+    )

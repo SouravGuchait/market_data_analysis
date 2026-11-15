@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from rest_framework import serializers
 
 from apps.analytics.models import AggregationRun
+from apps.analytics.services.metrics_calculator import (
+    DEFAULT_WINDOW,
+    MACD_DEFAULT_FAST,
+    MACD_DEFAULT_SIGNAL,
+    MACD_DEFAULT_SLOW,
+    MAX_INDICATOR_PERIOD,
+    MAX_INDICATOR_RANGE_DAYS,
+    MIN_INDICATOR_PERIOD,
+)
 from apps.analytics.services.timeframes import SUPPORTED_TIMEFRAMES
 from apps.exchanges.models import Exchange
 from apps.instruments.models import Instrument
@@ -144,6 +153,107 @@ class ReturnsFilterSerializer(serializers.Serializer):
                         "portfolio_id, or an exchange filter."
                     ]
                 }
+            )
+        return attrs
+
+
+def _require_analytics_scope(attrs: dict[str, object]) -> None:
+    has_scope = any(
+        attrs.get(key) is not None
+        for key in (
+            "instrument_id",
+            "instrument_symbol",
+            "instrument_name",
+            "portfolio_id",
+            "exchange_id",
+            "exchange_code",
+        )
+    )
+    if not has_scope:
+        raise serializers.ValidationError(
+            {
+                "detail": [
+                    "Provide instrument_id, instrument_symbol, instrument_name, "
+                    "portfolio_id, or an exchange filter."
+                ]
+            }
+        )
+
+
+def _validate_indicator_range(attrs: dict[str, object]) -> None:
+    start = attrs.get("start")
+    end = attrs.get("end")
+    if not isinstance(start, datetime) or not isinstance(end, datetime):
+        return
+    if end < start:
+        raise serializers.ValidationError({"end": ["end must be on or after start."]})
+    limit = timedelta(days=MAX_INDICATOR_RANGE_DAYS)
+    if end - start > limit:
+        raise serializers.ValidationError(
+            {"end": [f"Date range must not exceed {MAX_INDICATOR_RANGE_DAYS} days."]}
+        )
+
+
+class _IndicatorScopeSerializer(serializers.Serializer):
+    instrument_id = serializers.IntegerField(required=False, min_value=1)
+    instrument_symbol = serializers.CharField(required=False, allow_blank=False)
+    instrument_name = serializers.CharField(required=False, allow_blank=False)
+    exchange_id = serializers.IntegerField(required=False, min_value=1)
+    exchange_code = serializers.CharField(required=False, allow_blank=False)
+    portfolio_id = serializers.UUIDField(required=False)
+    timeframe = serializers.ChoiceField(choices=CandleTimeframe.choices)
+    start = serializers.DateTimeField(required=False)
+    end = serializers.DateTimeField(required=False)
+    include_incomplete = serializers.BooleanField(required=False, default=False)
+
+    def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        _reject_dual_exchange(attrs)
+        _reject_dual_instrument(attrs)
+        _require_analytics_scope(attrs)
+        _validate_indicator_range(attrs)
+        return attrs
+
+
+class WindowIndicatorFilterSerializer(_IndicatorScopeSerializer):
+    """Query contract for SMA and EMA on trade-derived candle closes."""
+
+    window = serializers.IntegerField(
+        required=False,
+        default=DEFAULT_WINDOW,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+
+
+class MacdIndicatorFilterSerializer(_IndicatorScopeSerializer):
+    """Query contract for MACD. Defaults are the documented 12, 26, and 9."""
+
+    fast_period = serializers.IntegerField(
+        required=False,
+        default=MACD_DEFAULT_FAST,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+    slow_period = serializers.IntegerField(
+        required=False,
+        default=MACD_DEFAULT_SLOW,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+    signal_period = serializers.IntegerField(
+        required=False,
+        default=MACD_DEFAULT_SIGNAL,
+        min_value=MIN_INDICATOR_PERIOD,
+        max_value=MAX_INDICATOR_PERIOD,
+    )
+
+    def validate(self, attrs: dict[str, object]) -> dict[str, object]:
+        attrs = super().validate(attrs)
+        fast = attrs.get("fast_period")
+        slow = attrs.get("slow_period")
+        if isinstance(fast, int) and isinstance(slow, int) and fast >= slow:
+            raise serializers.ValidationError(
+                {"fast_period": ["fast_period must be less than slow_period."]}
             )
         return attrs
 

@@ -146,6 +146,9 @@ jobs:
       - name: Analytics formula tests
         run: .venv/bin/python -m pytest -q apps/analytics/tests/test_returns.py
 
+      - name: Trend indicator tests
+        run: .venv/bin/python -m pytest -q apps/analytics/tests/test_trend_indicators.py
+
       - name: Redis and Celery tests
         run: |
           .venv/bin/python -m pytest -q \
