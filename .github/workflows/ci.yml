@@ -195,6 +195,80 @@ jobs:
       - name: Streamlit frontend tests
         run: .venv/bin/python -m pytest -q streamlit_app/tests
 
+  integration:
+    name: integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: mda_integration
+          MYSQL_USER: mda_app
+          MYSQL_PASSWORD: mda_app
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=15
+          --health-start-period=30s
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      rabbitmq:
+        image: rabbitmq:3.13
+        env:
+          RABBITMQ_DEFAULT_USER: mda_app
+          RABBITMQ_DEFAULT_PASS: mda_app
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd="rabbitmq-diagnostics -q ping"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=15
+          --health-start-period=20s
+    env:
+      RUN_INTEGRATION: "1"
+      DJANGO_SETTINGS_MODULE: config.settings.integration
+      DJANGO_SECRET_KEY: ci-integration-secret-key-at-least-32-bytes
+      DJANGO_ALLOWED_HOSTS: testserver,localhost,127.0.0.1
+      DB_NAME: mda_integration
+      # Root is required so pytest-django can CREATE DATABASE test_mda_integration.
+      DB_USER: root
+      DB_PASSWORD: root
+      DB_HOST: 127.0.0.1
+      DB_PORT: "3306"
+      CACHE_URL: redis://127.0.0.1:6379/15
+      CELERY_BROKER_URL: amqp://mda_app:mda_app@127.0.0.1:5672//
+      CELERY_RESULT_BACKEND: rpc://
+      LOG_FILE_ENABLED: "False"
+      INGESTION_LOCAL_ROOT: data/integration-ingestion
+      INGESTION_SYSTEM_ROOT: data/integration-system
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: ./.github/actions/setup-python
+
+      - name: Integration tests
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m pytest -q \
+            -m integration \
+            --ds=config.settings.integration \
+            tests/integration
+
   docker:
     name: docker
     runs-on: ubuntu-24.04
@@ -294,6 +368,7 @@ jobs:
       - django
       - tests
       - streamlit
+      - integration
       - docker
     if: always() && !cancelled()
     steps:
@@ -304,11 +379,12 @@ jobs:
           DJANGO: ${{ needs.django.result }}
           TESTS: ${{ needs.tests.result }}
           STREAMLIT: ${{ needs.streamlit.result }}
+          INTEGRATION: ${{ needs.integration.result }}
           DOCKER: ${{ needs.docker.result }}
         run: |
           set -euo pipefail
           failed=0
-          for name in QUALITY SECURITY DJANGO TESTS STREAMLIT DOCKER; do
+          for name in QUALITY SECURITY DJANGO TESTS STREAMLIT INTEGRATION DOCKER; do
             result="${!name}"
             if [ "$result" != "success" ]; then
               echo "$name result: $result"

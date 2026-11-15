@@ -1384,19 +1384,37 @@ and rejects the development secret key and an empty host list.
 ## Tests
 
 Unit tests use in-memory SQLite and local-memory cache, so they need no
-external services:
+external services. Integration tests are excluded by default:
 
 ```powershell
 python -m pytest -q
 ```
 
-Integration tests use the real MySQL, Redis and Celery broker configured in
-`config.settings.development`:
+Integration tests use real MySQL, Redis, and RabbitMQ via
+`config.settings.integration`. Start Compose `db`, `redis`, and `rabbitmq`
+(or equivalent services), then:
 
-```powershell
-$env:RUN_INTEGRATION="1"
-python -m pytest -m integration --ds=config.settings.development
+```bash
+export RUN_INTEGRATION=1
+# Host/port/cache/broker can come from your shell/.env.
+# Integration settings force DB_NAME=mda_integration and prefer root
+# (DB_ROOT_PASSWORD or DB_USER=root) so pytest-django can CREATE DATABASE.
+python -m pytest -m integration --ds=config.settings.integration tests/integration
 ```
+
+With Compose MySQL on the published host port (example `3307`):
+
+```bash
+set -a && source .env && set +a
+export RUN_INTEGRATION=1
+export DB_HOST=127.0.0.1 DB_PORT="$MYSQL_HOST_PORT"
+export CACHE_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/15"
+export CELERY_BROKER_URL="amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@127.0.0.1:${RABBITMQ_HOST_PORT}//"
+python -m pytest -m integration --ds=config.settings.integration tests/integration
+```
+
+The GitHub Actions `integration` job runs the same suite with service
+containers and a live Celery worker (started by the test fixtures).
 
 Static checks:
 
