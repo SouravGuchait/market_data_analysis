@@ -555,6 +555,7 @@ def test_import_copies_configured_s3_objects(
         Path(settings.INGESTION_SYSTEM_ROOT) / first["storage_key"]
     ).stat().st_mtime == pytest.approx(remote.modified_at.timestamp(), abs=1)
 
+
 def test_import_returns_400_when_s3_denies_access(
     auth_client: APIClient,
     ingestion_root,

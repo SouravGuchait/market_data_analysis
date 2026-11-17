@@ -32,6 +32,7 @@ IMPORT_BACKENDS = ("local", "s3")
 
 logger = logging.getLogger("apps.ingestion.imports")
 
+
 @dataclass(frozen=True)
 class ImportSkip:
     name: str
@@ -139,6 +140,8 @@ def _log_scan(selected: Sequence[str], scanned: ScanSummary) -> None:
             "s3_files": scanned.s3,
         },
     )
+
+
 def _import_one(
     adapter: LocalStorageAdapter,
     owner: User,

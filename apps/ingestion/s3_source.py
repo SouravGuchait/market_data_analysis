@@ -43,8 +43,10 @@ class RemoteObject:
     size_bytes: int
     modified_at: datetime
 
+
 def _prefix() -> str:
     return str(settings.INGESTION_S3_PREFIX).strip().strip("/")
+
 
 def _bucket() -> str:
     return str(settings.INGESTION_S3_BUCKET).strip()
@@ -65,6 +67,7 @@ def _call(target: object, method_name: str, /, *args: str, **kwargs: str) -> obj
         raise StorageError("The S3 client does not provide the requested operation.")
     result = method(*args, **kwargs)
     return result or {}
+
 
 def _iter_pages(pages: Iterable[object]) -> Iterator[object]:
     """Yield listing pages, translating failures raised lazily during iteration."""
