@@ -256,7 +256,7 @@ Each stored file becomes one Celery task on RabbitMQ. The worker process count i
 
 | Call | Request | What it does |
 | --- | --- | --- |
-| `POST /api/v1/ingestion/files/import/` | JSON `{ "storage_backends": ["local", "s3"] }`. Omit the body to read local, and S3 when `INGESTION_S3_BUCKET` is set. | Reads the current contents of the local drop folder and configured S3 prefix, copies matching files into the system volume `users/<caller id>/files/`, and queues them. Source files and S3 objects are retained. Run import again after adding files; the container does not need a restart. A file with no matching rule stays in its source location. |
+| `POST /api/v1/ingestion/files/import/` | JSON `{ "storage_backends": ["local", "s3"] }`. Omit the body to read local, and S3 when `INGESTION_S3_BUCKET` is set. | Reads the current contents of the local drop folder and configured S3 prefix, copies matching files into the system volume `users/<caller id>/files/`, and queues them. Source files and S3 objects are retained. Run import again after adding files; the container does not need a restart. A file with no matching rule stays in its source location. The response reports `scanned` counts per backend, e.g. `{"local": 0, "s3": 2}`; `s3: 0` means the configured prefix matched no objects and a warning with the S3 location is logged. S3 failures such as denied access return `400` instead of a server error. |
 | `GET /api/v1/ingestion/logs/` | No body. Optional `page` and `page_size`. | Returns accepted, rejected and duplicate counts from the ingestion log for the caller's finished files. It does not count rows in the trade or daily candle tables. |
 | Celery Beat `scan_enabled_ingestion_rules` | No HTTP body. Schedule is `INGESTION_SCAN_INTERVAL_SECONDS`. | Scans administrative rules whose owner is null. It does not scan user-owned rules. User files are queued by import. |
 
@@ -301,6 +301,21 @@ POST /api/v1/ingestion/files/import/
 ```
 
 Omit the body to read local files, and S3 when `INGESTION_S3_BUCKET` is set. `POST /api/v1/ingestion/{ingestion_id}/retry/` has no body. `GET /api/v1/ingestion/logs/`, `GET /api/v1/ingestion/files/`, `GET /api/v1/ingestion/rules/`, `GET /api/v1/ingestion/`, `GET /api/v1/ingestion/{id}/` and `GET /api/v1/ingestion/{id}/rejections/` have no body. List calls accept `page` and `page_size`. Ingestion list filters are query parameters: `status`, `data_type`, `rule_id`, `filename`, `start_date`, `end_date`.
+
+The import response lists what each backend produced, so an empty result is visible without reading logs:
+
+```json
+{
+  "success": true,
+  "message": "Configured files stored",
+  "data": {
+    "scanned": {"local": 0, "s3": 2},
+    "stored": [],
+    "skipped": [],
+    "queued": []
+  }
+}
+```
 
 ### Uploading the same dates again
 
@@ -1358,7 +1373,7 @@ Optional ingestion settings:
 - `INGESTION_TASK_MAX_RETRIES` (default `5`) — Celery retries for transient ingestion failures.
 - `INGESTION_TASK_SOFT_TIME_LIMIT_SECONDS` (default `1800`) — soft time limit for `process_ingestion_file`.
 - `INGESTION_TASK_TIME_LIMIT_SECONDS` (default `2100`) — hard time limit for `process_ingestion_file`.
-- `INGESTION_S3_BUCKET`, `INGESTION_S3_PREFIX`, `INGESTION_S3_REGION` — S3 location read by the import call. Leave the bucket empty when S3 is not used.
+- `INGESTION_S3_BUCKET`, `INGESTION_S3_PREFIX`, `INGESTION_S3_REGION` — S3 location read by the import call. Leave the bucket empty when S3 is not used. `INGESTION_S3_PREFIX` must match the object keys exactly (`market-data` for `s3://bucket/market-data/...`); an empty `scanned.s3` in the import response means the prefix matched no objects. Docker injects these values when a container is created, so recreate the `web` and `worker` services after editing `.env` (`docker compose up -d --force-recreate web worker`) rather than restarting them.
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` — credentials read by the AWS SDK. These are not API fields.
 
 Production additionally requires `DJANGO_SETTINGS_MODULE=config.settings.production`

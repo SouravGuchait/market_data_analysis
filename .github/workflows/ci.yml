@@ -141,6 +141,9 @@ jobs:
             apps/ingestion/tests/test_services.py \
             apps/ingestion/tests/test_processing.py
 
+      - name: S3 source tests
+        run: .venv/bin/python -m pytest -q apps/ingestion/tests/test_s3_source.py
+
       - name: Tick deduplication tests
         run: |
           .venv/bin/python -m pytest -q \

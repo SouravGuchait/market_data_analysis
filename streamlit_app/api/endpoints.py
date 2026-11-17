@@ -113,8 +113,10 @@ def post_json(
     client: ApiClient,
     path: str,
     body: Mapping[str, object],
+    *,
+    timeout: float | None = None,
 ) -> object:
-    return client.request(RequestOptions(method="POST", path=path, json_body=body))
+    return client.request(RequestOptions(method="POST", path=path, json_body=body, timeout=timeout))
 
 
 def patch_json(

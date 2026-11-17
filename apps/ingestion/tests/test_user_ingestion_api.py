@@ -27,6 +27,7 @@ from apps.ingestion.models import (
     StorageFile,
 )
 from apps.ingestion.s3_source import RemoteObject
+from apps.ingestion.storage import StorageError
 from apps.ingestion.tasks import scan_enabled_ingestion_rules
 
 pytestmark = pytest.mark.django_db
@@ -478,6 +479,7 @@ def test_import_copies_every_configured_local_file(
         )
     )
     assert response.status_code == 201
+    assert _data_dict(response)["scanned"] == {"local": 2, "s3": 0}
     stored = _data_dict(response)["stored"]
     assert isinstance(stored, list)
     names: list[str] = []
@@ -542,6 +544,7 @@ def test_import_copies_configured_s3_objects(
         )
 
     assert response.status_code == 201
+    assert _data_dict(response)["scanned"] == {"local": 0, "s3": 1}
     stored = _data_dict(response)["stored"]
     assert isinstance(stored, list)
     first = stored[0]
@@ -551,6 +554,30 @@ def test_import_copies_configured_s3_objects(
     assert (
         Path(settings.INGESTION_SYSTEM_ROOT) / first["storage_key"]
     ).stat().st_mtime == pytest.approx(remote.modified_at.timestamp(), abs=1)
+
+
+def test_import_returns_400_when_s3_denies_access(
+    auth_client: APIClient,
+    ingestion_root,
+    settings,
+) -> None:
+    settings.INGESTION_S3_BUCKET = "market-bucket"
+    settings.INGESTION_S3_PREFIX = "market-data"
+
+    with patch(
+        "apps.ingestion.imports.list_remote_objects",
+        side_effect=StorageError("S3 denied access to the configured location."),
+    ):
+        response = _response(
+            auth_client.post(
+                reverse("ingestion-file-import"),
+                {"storage_backends": ["s3"], "storage_prefix": "files"},
+                format="json",
+            )
+        )
+
+    assert response.status_code == 400
+    assert _text_field(_payload(response), "message") == "Unable to read the configured storage."
 
 
 def test_import_rejects_s3_when_the_bucket_is_not_configured(

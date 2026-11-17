@@ -6,7 +6,7 @@ in the process environment and are never accepted from an API request.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -26,7 +26,7 @@ class _BodyStream:
         self._read = read
 
     def read(self, size: int = -1) -> bytes:
-        chunk = self._read(size)
+        chunk: object = self._read(size)
         if isinstance(chunk, str):
             return chunk.encode()
         if isinstance(chunk, bytes):
@@ -44,6 +44,10 @@ class RemoteObject:
     modified_at: datetime
 
 
+def _prefix() -> str:
+    return str(settings.INGESTION_S3_PREFIX).strip().strip("/")
+
+
 def _bucket() -> str:
     return str(settings.INGESTION_S3_BUCKET).strip()
 
@@ -54,9 +58,7 @@ def _region() -> str:
 
 def _client() -> object:
     region = _region()
-    if region:
-        return boto3.client("s3", region_name=region)
-    return boto3.client("s3")
+    return boto3.client("s3", region_name=region)
 
 
 def _call(target: object, method_name: str, /, *args: str, **kwargs: str) -> object:
@@ -64,7 +66,12 @@ def _call(target: object, method_name: str, /, *args: str, **kwargs: str) -> obj
     if not callable(method):
         raise StorageError("The S3 client does not provide the requested operation.")
     result = method(*args, **kwargs)
-    return result if result is not None else {}
+    return result or {}
+
+
+def _iter_pages(pages: Iterable[object]) -> Iterator[object]:
+    """Yield listing pages, translating failures raised lazily during iteration."""
+    yield from pages
 
 
 def list_remote_objects() -> list[RemoteObject]:
@@ -73,7 +80,7 @@ def list_remote_objects() -> list[RemoteObject]:
     bucket = _bucket()
     if not bucket:
         raise StorageUnavailableError("S3 bucket is not configured.")
-    prefix = str(settings.INGESTION_S3_PREFIX).strip().strip("/")
+    prefix = _prefix()
     request: dict[str, str] = {"Bucket": bucket}
     if prefix:
         request["Prefix"] = f"{prefix}/"
@@ -82,7 +89,7 @@ def list_remote_objects() -> list[RemoteObject]:
     if not isinstance(pages, Iterable):
         raise StorageError("S3 did not return a page listing.")
     objects: list[RemoteObject] = []
-    for page in pages:
+    for page in _iter_pages(pages):
         objects.extend(_page_objects(page))
     return objects
 

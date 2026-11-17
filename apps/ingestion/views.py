@@ -145,6 +145,7 @@ def _execute_import(request: Request, backends: list[str], prefix: str) -> Respo
     return success(
         "Configured files stored",
         {
+            "scanned": {"local": batch.scanned.local, "s3": batch.scanned.s3},
             "stored": StorageFileReadSerializer(batch.stored, many=True).data,
             "skipped": [{"name": item.name, "reason": item.reason} for item in batch.skipped],
             "queued": [

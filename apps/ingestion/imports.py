@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,7 +14,11 @@ from django.contrib.auth.models import User
 
 from .models import SUPPORTED_FILE_FORMATS, Ingestion, StorageBackend, StorageFile
 from .queue_upload import queue_uploaded_file
-from .s3_source import RemoteObject, list_remote_objects, open_remote_object
+from .s3_source import (
+    RemoteObject,
+    list_remote_objects,
+    open_remote_object,
+)
 from .storage import ByteStream, LocalStorageAdapter, StorageError, StorageLimitError
 from .user_services import (
     IngestionRequestError,
@@ -24,6 +29,8 @@ from .user_services import (
 )
 
 IMPORT_BACKENDS = ("local", "s3")
+
+logger = logging.getLogger("apps.ingestion.imports")
 
 
 @dataclass(frozen=True)
@@ -39,11 +46,20 @@ class QueuedImport:
     rule_id: str
 
 
+@dataclass(frozen=True)
+class ScanSummary:
+    """Number of source files found per configured backend."""
+
+    local: int = 0
+    s3: int = 0
+
+
 @dataclass
 class ImportBatch:
     stored: list[StorageFile]
     skipped: list[ImportSkip]
     queued: list[QueuedImport]
+    scanned: ScanSummary = field(default_factory=ScanSummary)
 
 
 class _PathStream:
@@ -92,16 +108,38 @@ def import_configured_files(
 
     prefix = _checked_prefix(storage_prefix)
     selected = _selected_backends(backends)
-    files = _source_files(selected)
+    files, scanned = _source_files(selected)
     limit = settings.INGESTION_IMPORT_MAX_FILES
     if len(files) > limit:
         raise _limit_error(limit)
+    _log_scan(selected, scanned)
 
     adapter = LocalStorageAdapter(settings.INGESTION_SYSTEM_ROOT, "")
-    batch = ImportBatch(stored=[], skipped=[], queued=[])
+    batch = ImportBatch(stored=[], skipped=[], queued=[], scanned=scanned)
     for source in files:
         _import_one(adapter, owner, source, prefix, batch)
+    logger.info(
+        "Configured ingestion import finished.",
+        extra={
+            "local_files": scanned.local,
+            "s3_files": scanned.s3,
+            "stored": len(batch.stored),
+            "skipped": len(batch.skipped),
+            "queued": len(batch.queued),
+        },
+    )
     return batch
+
+
+def _log_scan(selected: Sequence[str], scanned: ScanSummary) -> None:
+    logger.info(
+        "Configured ingestion import scanned sources.",
+        extra={
+            "backends": list(selected),
+            "local_files": scanned.local,
+            "s3_files": scanned.s3,
+        },
+    )
 
 
 def _import_one(
@@ -155,13 +193,21 @@ def _selected_backends(backends: Sequence[str]) -> list[str]:
     return selected
 
 
-def _source_files(backends: Sequence[str]) -> list[LocalImportFile | S3ImportFile]:
+def _source_files(
+    backends: Sequence[str],
+) -> tuple[list[LocalImportFile | S3ImportFile], ScanSummary]:
     files: list[LocalImportFile | S3ImportFile] = []
+    local_count = 0
+    remote_count = 0
     if "local" in backends:
-        files.extend(_local_files())
+        local_files = _local_files()
+        local_count = len(local_files)
+        files.extend(local_files)
     if "s3" in backends:
-        files.extend(S3ImportFile(item) for item in list_remote_objects())
-    return files
+        remote_files = [S3ImportFile(item) for item in list_remote_objects()]
+        remote_count = len(remote_files)
+        files.extend(remote_files)
+    return files, ScanSummary(local=local_count, s3=remote_count)
 
 
 def _existing_local_root() -> Path:

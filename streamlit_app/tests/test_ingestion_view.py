@@ -62,6 +62,47 @@ def test_import_result_renders_file_tables_without_storage_keys(
     ]
 
 
+def test_import_result_warns_when_no_source_files_were_scanned(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    warnings: list[str] = []
+    monkeypatch.setattr(st, "warning", warnings.append)
+
+    _show_import_result(
+        {
+            "scanned": {"local": 0, "s3": 0},
+            "stored": [],
+            "skipped": [],
+            "queued": [],
+        },
+        backends=["s3"],
+    )
+
+    assert warnings == [
+        "No files were found in s3. "
+        "Check INGESTION_S3_BUCKET/INGESTION_S3_PREFIX, then re-run import."
+    ]
+
+
+def test_import_result_reports_scanned_counts_when_files_were_skipped(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    notices: list[str] = []
+    monkeypatch.setattr(st, "info", notices.append)
+
+    _show_import_result(
+        {
+            "scanned": {"local": 1, "s3": 0},
+            "stored": [],
+            "skipped": [{"name": "old.csv", "reason": "Already stored."}],
+            "queued": [],
+        },
+        backends=["local"],
+    )
+
+    assert notices == ["Nothing new stored. Scanned 1 local file(s) and 0 S3 object(s); skipped 1."]
+
+
 def test_status_sections_group_files_by_row_counts_and_state() -> None:
     accepted: Mapping[str, object] = {
         "filename": "accepted.csv",

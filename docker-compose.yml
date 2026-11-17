@@ -180,6 +180,8 @@ services:
       # In-compose traffic must use the Docker service DNS name, not localhost.
       MDA_API_BASE_URL: ${COMPOSE_MDA_API_BASE_URL:-http://web:8000}
       MDA_API_TIMEOUT_SECONDS: ${MDA_API_TIMEOUT_SECONDS:-30}
+      # Imports can download many S3 objects before responding; keep this larger.
+      MDA_IMPORT_TIMEOUT_SECONDS: ${MDA_IMPORT_TIMEOUT_SECONDS:-600}
       STREAMLIT_REFERENCE_CACHE_TTL: ${STREAMLIT_REFERENCE_CACHE_TTL:-300}
       STREAMLIT_MARKET_CACHE_TTL: ${STREAMLIT_MARKET_CACHE_TTL:-30}
     ports:
