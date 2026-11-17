@@ -2,6 +2,8 @@
 
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
+<img width="1780" height="990" alt="image" src="https://github.com/user-attachments/assets/e79931c8-53ed-4d5c-9a7b-364e154c691b" />
+<img width="1760" height="982" alt="image" src="https://github.com/user-attachments/assets/e6630f64-1ddf-4576-810c-be2653d9f6fd" />
 
 This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), **SMA, EMA, and MACD** (Feature 009), **Bollinger Bands and ATR** (Feature 010), **RSI and Stochastic** (Feature 011), **maximum drawdown** (Feature 020), **built-in ingestion row checks** (Feature 021), and **user-owned validation-rule configurations** (Feature 022). Volume, price-action, and statistical indicators remain future work (Features 012–014).
 
