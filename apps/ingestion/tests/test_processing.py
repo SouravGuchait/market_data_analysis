@@ -79,7 +79,6 @@ def _queued_ingestion(
 ) -> Ingestion:
     rule.data_type = data_type
     rule.chunk_size = chunk_size
-    rule.supported_formats = ["csv"]
     rule.save()
     return Ingestion.objects.create(
         rule=rule,

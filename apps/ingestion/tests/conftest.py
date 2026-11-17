@@ -60,7 +60,6 @@ def rule(db, inbox: Path) -> IngestionRule:
         storage_backend=StorageBackend.LOCAL,
         location_reference="inbox",
         file_pattern="*.csv",
-        supported_formats=["csv"],
         scan_interval_seconds=1,
         stability_policy={
             "required_stable_scans": 2,

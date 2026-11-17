@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
-from django.urls import reverse
+from django.urls import Resolver404, resolve, reverse
 from django.utils import timezone
 from rest_framework.response import Response
 from rest_framework.test import APIClient
@@ -127,10 +129,6 @@ def _import_files(
         )
     )
     assert response.status_code == 201, response.content
-    for upload in files:
-        staged = root / Path(upload.name or "upload.bin").name
-        if staged.is_file():
-            staged.unlink()
     stored = _data_dict(response)["stored"]
     if not isinstance(stored, list):
         raise AssertionError("Expected a list of stored files.")
@@ -196,7 +194,7 @@ def test_import_stores_multiple_files_under_the_user_directory(
         assert settings.INGESTION_LOCAL_ROOT not in key
         assert (Path(settings.INGESTION_SYSTEM_ROOT) / key).is_file()
         assert not (ingestion_root / key).exists()
-        assert not (ingestion_root / "alpha.csv").exists()
+        assert (ingestion_root / "alpha.csv").is_file()
         first_id = first_id or file_id
     event = AuditEvent.objects.get(actor=user, resource_id=first_id)
     assert event.action == AuditAction.INGESTION_STARTED
@@ -524,6 +522,7 @@ def test_import_copies_configured_s3_objects(
         key="incoming/synthetic_ticks.csv",
         name="synthetic_ticks.csv",
         size_bytes=16,
+        modified_at=timezone.now() - timedelta(days=2),
     )
 
     def open_remote(key: str) -> BytesIO:
@@ -549,6 +548,9 @@ def test_import_copies_configured_s3_objects(
     assert isinstance(first, dict)
     assert first.get("original_filename") == "synthetic_ticks.csv"
     assert StorageFile.objects.filter(original_filename="synthetic_ticks.csv").count() == 1
+    assert (
+        Path(settings.INGESTION_SYSTEM_ROOT) / first["storage_key"]
+    ).stat().st_mtime == pytest.approx(remote.modified_at.timestamp(), abs=1)
 
 
 def test_import_rejects_s3_when_the_bucket_is_not_configured(
@@ -567,7 +569,7 @@ def test_import_rejects_s3_when_the_bucket_is_not_configured(
     assert response.status_code == 400
 
 
-def test_import_queues_a_matching_rule_and_removes_the_upload(
+def test_import_queues_a_matching_rule_and_keeps_the_upload(
     auth_client: APIClient,
     user: User,
     ingestion_root: Path,
@@ -588,7 +590,7 @@ def test_import_queues_a_matching_rule_and_removes_the_upload(
         Path(settings.INGESTION_SYSTEM_ROOT) / "users" / str(user.pk) / "files" / "alpha.csv"
     )
     assert stored_path.is_file()
-    assert not (ingestion_root / "alpha.csv").exists()
+    assert (ingestion_root / "alpha.csv").read_bytes() == payload
     queued = _data_dict(response)["queued"]
     assert isinstance(queued, list)
     assert len(queued) == 1
@@ -602,29 +604,36 @@ def test_import_queues_a_matching_rule_and_removes_the_upload(
     assert Ingestion.objects.filter(owner=user, file_name="alpha.csv").count() == 1
 
 
-def test_validation_rule_set_can_be_created(
+def test_import_discovers_files_added_after_the_previous_request(
     auth_client: APIClient,
+    user: User,
+    ingestion_root: Path,
 ) -> None:
-    response = _response(
-        auth_client.post(
-            reverse("ingestion-validation-rule-set-create"),
-            {
-                "name": "daily-strict",
-                "data_type": "DAILY_OHLCV",
-                "version": "1",
-                "rules": [
-                    {"field_name": "close", "validator": "NUMERIC", "sort_order": 1},
-                ],
-            },
-            format="json",
-        )
-    )
-    assert response.status_code == 201
-    created = _data_dict(response)
-    assert created["name"] == "daily-strict"
-    rules = created["rules"]
-    assert isinstance(rules, list)
-    assert len(rules) == 1
+    _create_rule(auth_client)
+    first = ingestion_root / "first.csv"
+    first.write_bytes(b"exchange,symbol,close\nXNYS,ACME,1\n")
+    import_url = reverse("ingestion-file-import")
+    request_data = {"storage_backends": ["local"], "storage_prefix": "files"}
+
+    initial = _response(auth_client.post(import_url, request_data, format="json"))
+    assert initial.status_code == 201
+    assert first.is_file()
+
+    added = ingestion_root / "added.csv"
+    added.write_bytes(b"exchange,symbol,close\nXNYS,BETA,2\n")
+    refreshed = _response(auth_client.post(import_url, request_data, format="json"))
+
+    assert refreshed.status_code == 201
+    queued = _data_dict(refreshed)["queued"]
+    assert isinstance(queued, list)
+    assert [item["name"] for item in queued if isinstance(item, dict)] == ["added.csv"]
+    assert added.is_file()
+    assert Ingestion.objects.filter(owner=user).count() == 2
+
+
+def test_validation_rule_set_endpoint_is_removed() -> None:
+    with pytest.raises(Resolver404):
+        resolve(f"/{settings.API_PREFIX}ingestion/validation-rule-sets/")
 
 
 def _log_ingestion(rule: IngestionRule, owner: User, name: str, state: str) -> Ingestion:

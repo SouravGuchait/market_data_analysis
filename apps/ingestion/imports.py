@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from django.conf import settings
 from django.contrib.auth.models import User
 
 from .models import SUPPORTED_FILE_FORMATS, Ingestion, StorageBackend, StorageFile
-from .queue_upload import queue_uploaded_file, upload_is_registered
+from .queue_upload import queue_uploaded_file
 from .s3_source import RemoteObject, list_remote_objects, open_remote_object
 from .storage import ByteStream, LocalStorageAdapter, StorageError, StorageLimitError
 from .user_services import (
@@ -58,13 +59,11 @@ class LocalImportFile:
 
     def __init__(self, path: Path) -> None:
         self.name = path.name
-        self.size_bytes = path.stat().st_size
+        stat = path.stat()
+        self.size_bytes = stat.st_size
+        self.modified_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC)
         self.content_hash = _hash_file(path)
         self._path = path
-
-    @property
-    def path(self) -> Path:
-        return self._path
 
     def open(self) -> ByteStream:
         return _PathStream(self._path)
@@ -76,6 +75,7 @@ class S3ImportFile:
     def __init__(self, item: RemoteObject) -> None:
         self.name = item.name
         self.size_bytes = item.size_bytes
+        self.modified_at = item.modified_at
         self.content_hash = ""
         self._key = item.key
 
@@ -114,8 +114,6 @@ def _import_one(
     record, reason = _store_source(adapter, owner, source, prefix)
     stored = record or _existing_copy(owner, source, reason)
     queued = queue_uploaded_file(owner, stored) if stored is not None else []
-    if queued or (stored is not None and upload_is_registered(owner, stored)):
-        _remove_upload_source(source)
     if record is None:
         batch.skipped.append(ImportSkip(name=source.name, reason=reason))
     else:
@@ -139,18 +137,6 @@ def _existing_copy(
         return None
     storage_key = f"{user_files_location(owner)}/{source.name}"
     return StorageFile.objects.filter(owner=owner, storage_key=storage_key, is_active=True).first()
-
-
-def _remove_upload_source(source: LocalImportFile | S3ImportFile) -> None:
-    if not isinstance(source, LocalImportFile):
-        return
-    root = Path(settings.INGESTION_LOCAL_ROOT).expanduser().resolve()
-    path = source.path.resolve()
-    if not path.is_relative_to(root) or not path.is_file():
-        return
-    relative = path.relative_to(root)
-    if relative.parts and relative.parts[0] != "users":
-        path.unlink()
 
 
 def _selected_backends(backends: Sequence[str]) -> list[str]:
@@ -231,7 +217,12 @@ def _write_source(
     storage_key: str,
 ) -> str:
     try:
-        adapter.save(source.open(), storage_key, max_bytes=settings.INGESTION_MAX_UPLOAD_BYTES)
+        adapter.save(
+            source.open(),
+            storage_key,
+            max_bytes=settings.INGESTION_MAX_UPLOAD_BYTES,
+            modified_at=source.modified_at,
+        )
     except StorageLimitError:
         return "The file exceeds the configured maximum size."
     except StorageError:

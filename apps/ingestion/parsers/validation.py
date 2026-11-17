@@ -1,4 +1,4 @@
-"""Database-configured validators implemented in application code."""
+"""Built-in row validators implemented in application code."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from apps.instruments.models import Instrument
 
 @dataclass(frozen=True)
 class ValidatorSpec:
-    """One enabled validator drawn from a rule-set snapshot."""
+    """One built-in validator applied to a normalized chunk."""
 
     field_name: str
     validator: str
@@ -56,32 +56,6 @@ def default_validators(data_type: str) -> list[ValidatorSpec]:
         ValidatorSpec("", "EXCHANGE_INSTRUMENT_MATCH", {}),
         ValidatorSpec("", "DUPLICATE_CHECK", {}),
     ]
-
-
-def load_validators(
-    data_type: str,
-    rule_rows: Sequence[Mapping[str, object]] | None,
-) -> list[ValidatorSpec]:
-    if not rule_rows:
-        return default_validators(data_type)
-    specs: list[ValidatorSpec] = []
-    for row in rule_rows:
-        if not bool(row.get("is_enabled", True)):
-            continue
-        specs.append(
-            ValidatorSpec(
-                field_name=str(row.get("field_name", "")),
-                validator=str(row.get("validator", "")).upper(),
-                parameters=_as_mapping(row.get("parameters")),
-            )
-        )
-    return specs or default_validators(data_type)
-
-
-def _as_mapping(value: object) -> Mapping[str, object]:
-    if isinstance(value, Mapping):
-        return value
-    return {}
 
 
 def empty_rejection_frame() -> pd.DataFrame:

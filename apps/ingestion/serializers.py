@@ -19,9 +19,6 @@ from .models import (
     RejectedRow,
     StorageBackend,
     StorageFile,
-    ValidationRule,
-    ValidationRuleSet,
-    ValidatorType,
     _safe_storage_prefix,
 )
 
@@ -72,7 +69,6 @@ class IngestionRuleReadSerializer(serializers.ModelSerializer):
             "parser_config",
             "instrument_mapping",
             "exchange_mapping",
-            "validation_rule_set_id",
             "chunk_size",
             "is_enabled",
             "created_at",
@@ -108,7 +104,6 @@ class IngestionReadSerializer(serializers.ModelSerializer):
             "duplicate_rows",
             "chunks_processed",
             "chunk_size",
-            "validation_rule_set_version",
             "error_summary",
             "started_at",
             "completed_at",
@@ -166,7 +161,6 @@ class IngestionRuleWriteSerializer(serializers.Serializer):
     parser_config = serializers.JSONField()
     instrument_mapping = serializers.JSONField(required=False)
     exchange_mapping = serializers.JSONField(required=False)
-    validation_rule_set_id = serializers.UUIDField(required=False, allow_null=True)
 
     def validate_storage_backend(self, value: str) -> str:
         normalized = value.strip().lower()
@@ -254,40 +248,6 @@ class ConfiguredImportSerializer(serializers.Serializer):
         return prefix
 
 
-class ValidationRuleWriteSerializer(serializers.Serializer):
-    field_name = serializers.CharField(required=False, allow_blank=True, max_length=64, default="")
-    validator = serializers.ChoiceField(choices=ValidatorType.choices)
-    parameters = serializers.JSONField(required=False)
-    is_enabled = serializers.BooleanField(required=False, default=True)
-    sort_order = serializers.IntegerField(required=False, min_value=0)
-
-    def validate_parameters(self, value: object) -> dict[str, object]:
-        return _json_object(value, "Parameters must be a JSON object.")
-
-
-class ValidationRuleSetWriteSerializer(serializers.Serializer):
-    name = serializers.CharField(max_length=128)
-    data_type = serializers.ChoiceField(choices=DataType.choices)
-    version = serializers.CharField(required=False, max_length=64, default="1")
-    rules = ValidationRuleWriteSerializer(many=True, allow_empty=False)
-
-
-class ValidationRuleReadSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ValidationRule
-        fields = ("id", "field_name", "validator", "parameters", "is_enabled", "sort_order")
-        read_only_fields = fields
-
-
-class ValidationRuleSetReadSerializer(serializers.ModelSerializer):
-    rules = ValidationRuleReadSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = ValidationRuleSet
-        fields = ("id", "name", "data_type", "version", "is_active", "rules")
-        read_only_fields = fields
-
-
 def _json_object(value: object, message: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise serializers.ValidationError(message)
@@ -313,6 +273,4 @@ def rule_write_payload(validated: dict[str, object], *, creating: bool) -> dict[
         payload["instrument_mapping"] = {}
     if creating and "exchange_mapping" not in payload:
         payload["exchange_mapping"] = {}
-    if creating and "validation_rule_set_id" not in payload:
-        payload["validation_rule_set_id"] = None
     return payload

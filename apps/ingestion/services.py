@@ -19,6 +19,7 @@ from apps.audit.models import AuditAction, AuditResourceType, AuditStatus
 from apps.audit.services import record_system_event
 
 from .models import (
+    SUPPORTED_FILE_FORMATS,
     Ingestion,
     IngestionConfigurationError,
     IngestionObjectState,
@@ -298,7 +299,6 @@ def _create_ingestion(
             file_modified_at=obj.modified_at,
             content_hash=content_hash,
             data_type=rule.data_type,
-            validation_rule_set_version=str(rule.validation_rule_set_id or ""),
             chunk_size=rule.chunk_size,
             state=IngestionState.QUEUED,
         )
@@ -685,7 +685,7 @@ def scan_ingestion_rule(
         adapter = get_storage_adapter(rule.storage_backend, rule.location_reference)
         objects = adapter.list_objects(
             pattern=rule.file_pattern,
-            formats=rule.supported_formats,
+            formats=SUPPORTED_FILE_FORMATS,
         )
         result.listed = len(objects)
         _inspect_objects(

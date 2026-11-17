@@ -79,6 +79,8 @@ def resolve_stability_policy(raw: object) -> StabilityPolicy:
 
 
 def default_supported_formats() -> list[str]:
+    """Kept for migration 0001. Rules no longer store a file-type list."""
+
     return ["csv", "json", "xlsx"]
 
 
@@ -216,14 +218,12 @@ class IngestionRule(models.Model):
     )
     file_pattern = models.CharField(max_length=255, default="*")
     is_enabled = models.BooleanField(default=True)
-    supported_formats = models.JSONField(default=default_supported_formats, blank=True)
     schema_mapping = models.JSONField(default=default_mapping, blank=True)
     instrument_mapping = models.JSONField(default=default_mapping, blank=True)
     exchange_mapping = models.JSONField(default=default_mapping, blank=True)
     data_type = models.CharField(max_length=20, blank=True, default="")
     storage_prefix = models.CharField(max_length=64, blank=True, default="")
     parser_config = models.JSONField(default=default_mapping, blank=True)
-    validation_rule_set_id = models.UUIDField(null=True, blank=True)
     chunk_size = models.PositiveIntegerField(default=DEFAULT_CHUNK_SIZE)
     scan_interval_seconds = models.PositiveIntegerField(default=300)
     stability_policy = models.JSONField(default=default_stability_policy, blank=True)
@@ -281,7 +281,6 @@ class IngestionRule(models.Model):
         self.location_reference = (self.location_reference or "").strip()
         self.file_pattern = (self.file_pattern or "").strip()
         self._clean_paths()
-        self._clean_formats()
         self._clean_options()
 
     def _clean_paths(self) -> None:
@@ -305,25 +304,6 @@ class IngestionRule(models.Model):
             raise ValidationError(
                 {"location_reference": ("Local locations must be relative to the configured root.")}
             )
-
-    def _clean_formats(self) -> None:
-        formats = self.supported_formats or []
-        if not isinstance(formats, list) or not formats:
-            raise ValidationError(
-                {"supported_formats": "Provide at least one supported file format."}
-            )
-        invalid_formats = {str(value).lower() for value in formats} - set(SUPPORTED_FILE_FORMATS)
-        if not invalid_formats:
-            return
-        allowed = ", ".join(SUPPORTED_FILE_FORMATS)
-        raise ValidationError(
-            {
-                "supported_formats": (
-                    f"Unsupported format(s): {', '.join(sorted(invalid_formats))}. "
-                    f"Supported formats: {allowed}."
-                )
-            }
-        )
 
     def _clean_options(self) -> None:
         if self.data_type and self.data_type not in {DataType.DAILY_OHLCV, DataType.TICK_DATA}:
@@ -418,7 +398,6 @@ class Ingestion(models.Model):
     file_modified_at = models.DateTimeField()
     content_hash = models.CharField(max_length=64)
     data_type = models.CharField(max_length=20, blank=True, default="")
-    validation_rule_set_version = models.CharField(max_length=64, blank=True, default="")
     chunk_size = models.PositiveIntegerField(default=DEFAULT_CHUNK_SIZE)
     reprocess_version = models.PositiveIntegerField(default=1)
     rows_read = models.PositiveIntegerField(default=0)
@@ -527,76 +506,6 @@ class IngestionScan(models.Model):
 
     def __str__(self) -> str:
         return f"{self.rule.name} ({self.status})"
-
-
-class ValidatorType(models.TextChoices):
-    """Supported row validators. Arbitrary expressions are never executed."""
-
-    REQUIRED = "REQUIRED", "Required"
-    NUMERIC = "NUMERIC", "Numeric"
-    POSITIVE = "POSITIVE", "Positive"
-    NON_NEGATIVE = "NON_NEGATIVE", "Non-negative"
-    MIN_VALUE = "MIN_VALUE", "Minimum value"
-    MAX_VALUE = "MAX_VALUE", "Maximum value"
-    MAX_DECIMAL_PLACES = "MAX_DECIMAL_PLACES", "Maximum decimal places"
-    DATETIME = "DATETIME", "Datetime"
-    ENUM = "ENUM", "Enumeration"
-    OHLC_RELATIONSHIP = "OHLC_RELATIONSHIP", "OHLC relationship"
-    INSTRUMENT_EXISTS = "INSTRUMENT_EXISTS", "Instrument exists"
-    EXCHANGE_EXISTS = "EXCHANGE_EXISTS", "Exchange exists"
-    EXCHANGE_INSTRUMENT_MATCH = "EXCHANGE_INSTRUMENT_MATCH", "Exchange/instrument match"
-    DUPLICATE_CHECK = "DUPLICATE_CHECK", "Duplicate check"
-
-
-class ValidationRuleSet(models.Model):
-    """Named, versioned set of field validators for one data type."""
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    name = models.CharField(max_length=128)
-    data_type = models.CharField(max_length=20, choices=DataType.choices)
-    version = models.CharField(max_length=64, default="1")
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        db_table = "mda_validation_rule_sets"
-        ordering = ["name", "version"]
-        constraints = [
-            models.UniqueConstraint(
-                fields=["name", "version"],
-                name="unique_validation_rule_set_name_version",
-            )
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.name}@{self.version}"
-
-
-class ValidationRule(models.Model):
-    """One enabled validator belonging to a rule set."""
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    rule_set = models.ForeignKey(
-        ValidationRuleSet,
-        on_delete=models.CASCADE,
-        related_name="rules",
-    )
-    field_name = models.CharField(max_length=64, blank=True, default="")
-    validator = models.CharField(max_length=64, choices=ValidatorType.choices)
-    parameters = models.JSONField(default=default_mapping, blank=True)
-    is_enabled = models.BooleanField(default=True)
-    sort_order = models.PositiveIntegerField(default=0)
-
-    class Meta:
-        db_table = "mda_validation_rules"
-        ordering = ["rule_set", "sort_order", "id"]
-        indexes = [
-            models.Index(fields=["rule_set", "sort_order"], name="idx_validation_rule_order"),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.validator}:{self.field_name or '*'}"
 
 
 class BatchStatus(models.TextChoices):

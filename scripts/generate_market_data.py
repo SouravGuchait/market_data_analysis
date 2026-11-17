@@ -15,12 +15,13 @@ Examples:
     python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 \\
         --seed 42 --formats csv --output-dir sample_data
 
-    # Second run without duplicates: advance past the last trading day printed
-    python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 \\
-        --seed 42 --formats csv --start-date 2027-11-02 --no-dirty --output-dir sample_data
 
     python3 scripts/generate_market_data.py --exponent 5 --seed 42
     python3 scripts/generate_market_data.py --base 2 --exponent 16 --symbols 8
+
+        python3 scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 20 \\
+        --seed 42 --formats json --start-date 2027-12-02  --output-dir sample_data
+        --no-dirty
 """
 
 import argparse

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 
 import boto3
 from django.conf import settings
@@ -40,6 +41,7 @@ class RemoteObject:
     key: str
     name: str
     size_bytes: int
+    modified_at: datetime
 
 
 def _bucket() -> str:
@@ -111,22 +113,28 @@ def _page_objects(page: object) -> list[RemoteObject]:
     return objects
 
 
-def _remote_fields(item: object) -> tuple[str, int] | None:
+def _remote_fields(item: object) -> tuple[str, int, datetime] | None:
     if not isinstance(item, dict):
         return None
     key = item.get("Key")
     size = item.get("Size")
-    if not isinstance(key, str) or key.endswith("/") or not isinstance(size, int):
+    modified_at = item.get("LastModified")
+    if (
+        not isinstance(key, str)
+        or key.endswith("/")
+        or not isinstance(size, int)
+        or not isinstance(modified_at, datetime)
+    ):
         return None
-    return key, size
+    return key, size, modified_at
 
 
 def _remote_object(item: object) -> RemoteObject | None:
     fields = _remote_fields(item)
     if fields is None:
         return None
-    key, size = fields
+    key, size, modified_at = fields
     name = key.rsplit("/", 1)[-1]
     if not name:
         return None
-    return RemoteObject(key=key, name=name, size_bytes=size)
+    return RemoteObject(key=key, name=name, size_bytes=size, modified_at=modified_at)
