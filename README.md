@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), **SMA, EMA, and MACD** (Feature 009), **Bollinger Bands and ATR** (Feature 010), **RSI and Stochastic** (Feature 011), **maximum drawdown** (Feature 020), and **built-in ingestion row checks** (Feature 021). Volume, price-action, and statistical indicators remain future work (Features 012–014).
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), **SMA, EMA, and MACD** (Feature 009), **Bollinger Bands and ATR** (Feature 010), **RSI and Stochastic** (Feature 011), **maximum drawdown** (Feature 020), **built-in ingestion row checks** (Feature 021), and **user-owned validation-rule configurations** (Feature 022). Volume, price-action, and statistical indicators remain future work (Features 012–014).
 
 ## Implemented features
 
@@ -981,6 +981,90 @@ period-level `maximum_drawdown`.
 ```http
 GET /api/v1/analytics/drawdown/?instrument_symbol=ACME&exchange_code=XNYS&start_date=2024-01-01&end_date=2024-12-31
 ```
+
+### Feature 022: User validation-rule configurations
+
+Feature 022 stores one validation configuration per user and asset type
+(`ohlcv` or `tick`), with retained versions and an auditable review lifecycle.
+Users create and edit natural-language drafts. A staff user can manually import
+a constrained JSON configuration for a configuration they own; the owner then
+approves or rejects it. Approved versions are immutable. This feature does not
+call an AI service or apply these configurations during ingestion; Feature 021
+continues to run its built-in checks.
+
+| Method | Endpoint | Purpose |
+| ------ | -------- | ------- |
+| GET | `/api/v1/rules/` | List the authenticated user's configurations. |
+| POST | `/api/v1/rules/` | Create a natural-language draft. |
+| GET | `/api/v1/rules/schema/?asset_type=ohlcv` | Discover the server-defined columns and operators for an asset type. |
+| GET | `/api/v1/rules/{configuration_id}/` | Retrieve a configuration and its version history. |
+| PATCH | `/api/v1/rules/{configuration_id}/` | Edit its natural-language description. |
+| POST | `/api/v1/rules/{configuration_id}/compiled-config/` | Staff-only manual import for the authenticated user's configuration. |
+| POST | `/api/v1/rules/{configuration_id}/approve/` | Approve a pending version as its owner. |
+| POST | `/api/v1/rules/{configuration_id}/reject/` | Reject a pending version as its owner. |
+
+Create a draft with a natural-language description:
+
+```http
+POST /api/v1/rules/
+Content-Type: application/json
+
+{
+  "asset_type": "ohlcv",
+  "description": "High must be at least low, and volume must be positive."
+}
+```
+
+The manual import endpoint accepts the constrained document directly as its
+request body. The asset type and schema version must match the draft and server
+schema. Columns, operators, rule fields, and value types are checked strictly;
+unknown fields and implicit type coercion are rejected.
+
+```http
+POST /api/v1/rules/2b6fe45a-8a91-4b3b-bcd1-22b96a718232/compiled-config/
+Content-Type: application/json
+
+{
+  "schema_version": 1,
+  "asset_type": "ohlcv",
+  "rules": [
+    {
+      "rule_id": "high_at_least_low",
+      "column": "high",
+      "operator": "greater_than_or_equal_column",
+      "compare_column": "low",
+      "severity": "error",
+      "message": "High must be at least low."
+    },
+    {
+      "rule_id": "positive_volume",
+      "column": "volume",
+      "operator": "greater_than",
+      "value": 0,
+      "severity": "error",
+      "message": "Volume must be positive."
+    }
+  ]
+}
+```
+
+Approval and rejection do not require request bodies:
+
+```http
+POST /api/v1/rules/2b6fe45a-8a91-4b3b-bcd1-22b96a718232/approve/
+```
+
+```http
+POST /api/v1/rules/2b6fe45a-8a91-4b3b-bcd1-22b96a718232/reject/
+```
+
+All endpoints require authentication and scope configuration reads and writes
+to the authenticated user's records. Configuration changes and review actions
+are recorded in the user audit log. The feature is disabled by default; set
+`ENABLE_VALIDATION_RULES=True` to register its models and API routes. Unit-test
+settings enable it so its test modules run; integration settings leave it off.
+No new package is required.
+
 ## Project layout
 
 ```text
@@ -1000,7 +1084,8 @@ GET /api/v1/analytics/drawdown/?instrument_symbol=ACME&exchange_code=XNYS&start_
 │   │   └── staging.py     # Staging dirs, manifest, retention cleanup
 │   ├── instruments/       # Instrument master data
 │   ├── market_data/       # DailyOHLCV, Trade, and trade-derived Candle models
-│   └── portfolios/        # User-owned portfolios and instrument configuration
+│   ├── portfolios/        # User-owned portfolios and instrument configuration
+│   └── validation_rules/  # User-owned validation configurations and versions
 ├── config/
 │   ├── settings/          # base, development, production, test
 │   ├── celery.py

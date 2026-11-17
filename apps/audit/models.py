@@ -27,6 +27,26 @@ class AuditAction(models.TextChoices):
     PORTFOLIO_INSTRUMENT_REMOVED = "portfolio_instrument_removed", "Portfolio instrument removed"
     INSTRUMENT_CREATED = "instrument_created", "Instrument created"
     INGESTION_RULE_CHANGED = "ingestion_rule_changed", "Ingestion rule changed"
+    VALIDATION_CONFIGURATION_CREATED = (
+        "validation_configuration_created",
+        "Validation configuration created",
+    )
+    VALIDATION_CONFIGURATION_UPDATED = (
+        "validation_configuration_updated",
+        "Validation configuration updated",
+    )
+    VALIDATION_CONFIG_IMPORTED = (
+        "validation_config_imported",
+        "Validation configuration imported",
+    )
+    VALIDATION_CONFIGURATION_APPROVED = (
+        "validation_configuration_approved",
+        "Validation configuration approved",
+    )
+    VALIDATION_CONFIGURATION_REJECTED = (
+        "validation_configuration_rejected",
+        "Validation configuration rejected",
+    )
     INGESTION_STARTED = "ingestion_started", "Ingestion started"
     INGESTION_COMPLETED = "ingestion_completed", "Ingestion completed"
     INGESTION_FAILED = "ingestion_failed", "Ingestion failed"
@@ -45,6 +65,7 @@ class AuditResourceType(models.TextChoices):
     PORTFOLIO_INSTRUMENT = "portfolio_instrument", "Portfolio instrument"
     INSTRUMENT = "instrument", "Instrument"
     INGESTION = "ingestion", "Ingestion"
+    VALIDATION_CONFIGURATION = "validation_configuration", "Validation configuration"
     ANALYTICS = "analytics", "Analytics"
     SYSTEM = "system", "System"
 

@@ -30,3 +30,9 @@ urlpatterns = [
     path(prefix + "health/", include("apps.common.urls"), name="health"),
     path("health", lambda request: HttpResponse("OK", content_type="text/plain")),
 ]
+
+if settings.ENABLE_VALIDATION_RULES:
+    urlpatterns.insert(
+        6,
+        path(prefix + "rules/", include("apps.validation_rules.urls")),
+    )
