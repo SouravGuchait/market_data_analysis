@@ -41,22 +41,9 @@ def upload_is_registered(owner: User, storage_file: StorageFile) -> bool:
 
 
 def _matching_rules(owner: User, filename: str) -> list[IngestionRule]:
-    extension = Path(filename).suffix.lower().lstrip(".")
     location = user_files_location(owner)
     rules = IngestionRule.objects.filter(owner=owner, is_enabled=True, location_reference=location)
-    return [
-        rule
-        for rule in rules
-        if fnmatch(filename, rule.file_pattern) and _format_matches(rule, extension)
-    ]
-
-
-def _format_matches(rule: IngestionRule, extension: str) -> bool:
-    formats = rule.supported_formats
-    if not isinstance(formats, list):
-        return False
-    allowed = {str(item).lower().lstrip(".") for item in formats}
-    return extension in allowed
+    return [rule for rule in rules if fnmatch(filename, rule.file_pattern)]
 
 
 def _queue_for_rule(rule: IngestionRule, storage_file: StorageFile) -> Ingestion | None:

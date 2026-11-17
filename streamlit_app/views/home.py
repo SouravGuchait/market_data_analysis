@@ -52,14 +52,18 @@ def render_home() -> None:
     if instrument is None:
         st.info("Select a portfolio instrument to load market data.")
         return
-    daily_rows = _load_daily(access, refresh, instrument, days)
+    start_date, end_date = _market_date_range(days)
+    if end_date < start_date:
+        st.warning("End date must be on or after the start date.")
+        return
+    daily_rows = _load_daily(access, refresh, instrument, start_date, end_date)
     symbol, code = _symbol_code(instrument)
     scope = MarketScope(access=access, refresh=refresh, symbol=symbol, exchange_code=code)
     chart_col, side_col = st.columns([3.1, 1.15], gap="medium")
     with chart_col:
-        _render_market_block(scope, instrument, tf, days, daily_rows)
+        _render_market_block(scope, instrument, tf, (start_date, end_date), daily_rows)
         _render_daily_table(daily_rows)
-        _render_trades_table(scope, daily_rows)
+        _render_trades_table(scope, start_date, end_date)
     with side_col:
         _render_ticks(scope, daily_rows)
         _render_ingestion_preview(access, refresh)
@@ -127,11 +131,10 @@ def _load_daily(
     access: str,
     refresh: str,
     instrument: Mapping[str, object],
-    days: int,
+    start_date: date,
+    end_date: date,
 ) -> list[Mapping[str, object]]:
     symbol, code = _symbol_code(instrument)
-    end = date.today()
-    start = end - timedelta(days=max(days, 30))
     payload = cached_get(
         access,
         refresh,
@@ -140,9 +143,9 @@ def _load_daily(
             {
                 "instrument_symbol": symbol,
                 "exchange_code": code,
-                "start_date": start.isoformat(),
-                "end_date": end.isoformat(),
-                "page_size": "30",
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "page_size": "100",
             }
         ),
     )
@@ -153,12 +156,13 @@ def _render_market_block(
     scope: MarketScope,
     instrument: Mapping[str, object],
     timeframe: str,
-    days: int,
+    date_range: tuple[date, date],
     daily_rows: list[Mapping[str, object]],
 ) -> None:
     exchange = as_mapping(instrument.get("exchange"))
-    end = datetime.now(tz=UTC)
-    start = end - timedelta(days=days)
+    start_date, end_date = date_range
+    start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=UTC)
+    end = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=UTC)
     candle_params = {
         "instrument_symbol": scope.symbol,
         "exchange_code": scope.exchange_code,
@@ -287,7 +291,7 @@ def _anchor_dates(daily_rows: list[Mapping[str, object]]) -> tuple[date, date]:
 
 
 def _render_daily_table(daily_rows: list[Mapping[str, object]]) -> None:
-    st.markdown('<div class="mda-section-title">Daily OHLCV (MySQL)</div>', unsafe_allow_html=True)
+    st.markdown('<div class="mda-section-title">Daily OHLCV</div>', unsafe_allow_html=True)
     if not daily_rows:
         st.caption("No daily OHLCV rows for this instrument/window.")
         return
@@ -306,28 +310,26 @@ def _render_daily_table(daily_rows: list[Mapping[str, object]]) -> None:
     )
 
 
-def _render_trades_table(scope: MarketScope, daily_rows: list[Mapping[str, object]]) -> None:
-    start_day, end_day = _anchor_dates(daily_rows)
-    start = datetime(start_day.year, start_day.month, start_day.day, tzinfo=UTC)
-    end = datetime(end_day.year, end_day.month, end_day.day, 23, 59, 59, tzinfo=UTC)
-    payload = cached_get(
-        scope.access,
-        scope.refresh,
-        "/api/v1/market-data/ticks/",
-        params_key(
-            {
-                "instrument_symbol": scope.symbol,
-                "exchange_code": scope.exchange_code,
-                "start": start.isoformat().replace("+00:00", "Z"),
-                "end": end.isoformat().replace("+00:00", "Z"),
-                "ordering": "-event_timestamp",
-                "page_size": "25",
-            }
-        ),
-    )
-    rows = page_results(payload)
-    st.markdown('<div class="mda-section-title">Trades (MySQL)</div>', unsafe_allow_html=True)
-    st.caption(f"Newest trades from {start_day} to {end_day}")
+def _market_date_range(days: int) -> tuple[date, date]:
+    default_end = date.today()
+    left, right = st.columns(2)
+    with left:
+        start_date = st.date_input(
+            "Data from", value=default_end - timedelta(days=days), key="home_market_start"
+        )
+    with right:
+        end_date = st.date_input("Data to", value=default_end, key="home_market_end")
+    return start_date, end_date
+
+
+def _render_trades_table(
+    scope: MarketScope,
+    start_date: date,
+    end_date: date,
+) -> None:
+    rows = _load_trade_rows(scope, start_date, end_date)
+    st.markdown('<div class="mda-section-title">Trades</div>', unsafe_allow_html=True)
+    st.caption(f"Trades from {start_date} to {end_date}")
     if not rows:
         st.caption("No trades in this window.")
         return
@@ -342,6 +344,37 @@ def _render_trades_table(scope: MarketScope, daily_rows: list[Mapping[str, objec
             for row in rows[:20]
         ]
     )
+
+
+def _load_trade_rows(
+    scope: MarketScope,
+    start_date: date,
+    end_date: date,
+) -> list[Mapping[str, object]]:
+    rows: list[Mapping[str, object]] = []
+    chunk_start = start_date
+    while chunk_start <= end_date:
+        chunk_end = min(chunk_start + timedelta(days=30), end_date)
+        start = datetime(chunk_start.year, chunk_start.month, chunk_start.day, tzinfo=UTC)
+        end = datetime(chunk_end.year, chunk_end.month, chunk_end.day, 23, 59, 59, tzinfo=UTC)
+        payload = cached_get(
+            scope.access,
+            scope.refresh,
+            "/api/v1/market-data/ticks/",
+            params_key(
+                {
+                    "instrument_symbol": scope.symbol,
+                    "exchange_code": scope.exchange_code,
+                    "start": start.isoformat().replace("+00:00", "Z"),
+                    "end": end.isoformat().replace("+00:00", "Z"),
+                    "ordering": "-event_timestamp",
+                    "page_size": "25",
+                }
+            ),
+        )
+        rows.extend(page_results(payload))
+        chunk_start = chunk_end + timedelta(days=1)
+    return sorted(rows, key=lambda row: str(row.get("event_timestamp") or ""), reverse=True)
 
 
 def _render_ticks(scope: MarketScope, daily_rows: list[Mapping[str, object]]) -> None:

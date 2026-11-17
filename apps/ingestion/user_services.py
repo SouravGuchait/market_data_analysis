@@ -88,11 +88,6 @@ def _checked_filename(original_name: str) -> tuple[str, str]:
     return name, extension
 
 
-def _formats_for_parser(parser_config: dict[str, object]) -> list[str]:
-    raw_format = parser_config.get("format", "csv")
-    return [str(raw_format).lower()]
-
-
 def _apply_rule_fields(rule: IngestionRule, owner: User, data: dict[str, object]) -> None:
     prefix = data.get("storage_prefix", rule.storage_prefix or USER_FILE_SEGMENT)
     if isinstance(prefix, str) and prefix:
@@ -106,14 +101,11 @@ def _apply_rule_fields(rule: IngestionRule, owner: User, data: dict[str, object]
         "parser_config",
         "instrument_mapping",
         "exchange_mapping",
-        "validation_rule_set_id",
         "chunk_size",
         "is_enabled",
     ):
         if field in data:
             setattr(rule, field, data[field])
-    if isinstance(rule.parser_config, dict):
-        rule.supported_formats = _formats_for_parser(rule.parser_config)
     rule.storage_backend = StorageBackend.LOCAL
 
 

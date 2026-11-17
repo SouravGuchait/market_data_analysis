@@ -31,7 +31,6 @@ from .selectors import (
     list_owned_rejections,
     list_owned_rules,
     list_storage_files,
-    list_validation_rule_sets,
 )
 from .serializers import (
     ConfiguredImportSerializer,
@@ -42,8 +41,6 @@ from .serializers import (
     IngestionRuleWriteSerializer,
     RejectedRowReadSerializer,
     StorageFileReadSerializer,
-    ValidationRuleSetReadSerializer,
-    ValidationRuleSetWriteSerializer,
     rule_write_payload,
 )
 from .storage import StorageError
@@ -53,7 +50,6 @@ from .user_services import (
     retry_owned_ingestion,
     update_user_rule,
 )
-from .validation_sets import create_validation_rule_set
 
 logger = logging.getLogger("apps.ingestion.views")
 
@@ -214,36 +210,6 @@ class StorageFileListView(APIView):
             list_storage_files(_owner(request)),
             StorageFileReadSerializer,
             "Files retrieved",
-        )
-
-
-class ValidationRuleSetCreateView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    @extend_schema(tags=["ingestion"])
-    def get(self, request: Request) -> Response:
-        data_type = request.query_params.get("data_type", "")
-        return _paginated(
-            self,
-            request,
-            list_validation_rule_sets(data_type=data_type),
-            ValidationRuleSetReadSerializer,
-            "Validation rule sets retrieved",
-        )
-
-    @extend_schema(tags=["ingestion"])
-    def post(self, request: Request) -> Response:
-        serializer = ValidationRuleSetWriteSerializer(data=request.data)
-        if not serializer.is_valid():
-            return failure("Validation failed", serializer.errors, status.HTTP_400_BAD_REQUEST)
-        try:
-            rule_set = create_validation_rule_set(_mapping(serializer.validated_data))
-        except IngestionRequestError as exc:
-            return _request_failure(exc)
-        return success(
-            "Validation rule set created",
-            ValidationRuleSetReadSerializer(rule_set).data,
-            status.HTTP_201_CREATED,
         )
 
 
@@ -419,8 +385,7 @@ def _paginated(
     | type[IngestionRuleReadSerializer]
     | type[IngestionReadSerializer]
     | type[IngestionLogSerializer]
-    | type[RejectedRowReadSerializer]
-    | type[ValidationRuleSetReadSerializer],
+    | type[RejectedRowReadSerializer],
     message: str,
 ) -> Response:
     paginator = IngestionPagination()

@@ -17,11 +17,9 @@ from apps.ingestion.converters.types import ConversionManifest, ConvertRequest
 from apps.ingestion.models import (
     Ingestion,
     IngestionState,
-    ValidationRule,
-    ValidationRuleSet,
 )
 from apps.ingestion.parsers.dataframe_processor import ProcessedChunk, process_staged_chunk
-from apps.ingestion.parsers.validation import ValidatorSpec, load_validators
+from apps.ingestion.parsers.validation import ValidatorSpec, default_validators
 from apps.ingestion.services import _record_transition, source_storage_key
 from apps.ingestion.staging import (
     ensure_staging_dir,
@@ -67,27 +65,8 @@ def _resolve_source_path(ingestion: Ingestion) -> Path:
     return path
 
 
-def _rule_rows(ingestion: Ingestion) -> list[dict[str, object]] | None:
-    rule_set_id = ingestion.rule.validation_rule_set_id
-    if rule_set_id is None:
-        return None
-    rule_set = ValidationRuleSet.objects.filter(pk=rule_set_id, is_active=True).first()
-    if rule_set is None:
-        return None
-    rows = ValidationRule.objects.filter(rule_set=rule_set).order_by("sort_order", "id")
-    return [
-        {
-            "field_name": rule.field_name,
-            "validator": rule.validator,
-            "parameters": rule.parameters if isinstance(rule.parameters, dict) else {},
-            "is_enabled": rule.is_enabled,
-        }
-        for rule in rows
-    ]
-
-
 def _validators_for(ingestion: Ingestion) -> list[ValidatorSpec]:
-    return load_validators(ingestion.data_type, _rule_rows(ingestion))
+    return default_validators(ingestion.data_type)
 
 
 def stage_ingestion(ingestion: Ingestion) -> ConversionManifest:
@@ -207,10 +186,6 @@ def _persist_pipeline_counters(ingestion: Ingestion, result: PipelineResult) -> 
         rejected_rows=result.rejected_rows,
         duplicate_rows=result.duplicate_rows,
         chunks_processed=result.chunks_processed,
-        validation_rule_set_version=(
-            ingestion.validation_rule_set_version
-            or str(ingestion.rule.validation_rule_set_id or "default")
-        ),
         updated_at=timezone.now(),
     )
 

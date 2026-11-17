@@ -119,7 +119,7 @@ def test_validation_error_includes_field_details(client: ApiClient) -> None:
                 "success": False,
                 "message": "Validation failed",
                 "data": None,
-                "errors": {"name": ["A validation rule set with this name and version exists."]},
+                "errors": {"name": ["A rule with this name already exists."]},
             },
         )
 
@@ -132,12 +132,12 @@ def test_validation_error_includes_field_details(client: ApiClient) -> None:
         client.request(
             RequestOptions(
                 method="POST",
-                path="/api/v1/ingestion/validation-rule-sets/",
+                path="/api/v1/ingestion/rules/",
                 json_body={},
                 auth=False,
             )
         )
-    assert "name and version exists" in raised.value.message
+    assert "already exists" in raised.value.message
 
 
 def test_auth_required_without_token() -> None:

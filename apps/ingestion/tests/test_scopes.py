@@ -30,9 +30,6 @@ from apps.ingestion.models import (
     Ingestion,
     IngestionState,
     StorageBackend,
-    ValidationRule,
-    ValidationRuleSet,
-    ValidatorType,
 )
 from apps.ingestion.parsers.column_mapping import (
     apply_column_map,
@@ -41,7 +38,7 @@ from apps.ingestion.parsers.column_mapping import (
 )
 from apps.ingestion.parsers.dataframe_processor import process_staged_chunk
 from apps.ingestion.parsers.normalization import normalize_empty_values
-from apps.ingestion.parsers.validation import apply_validators, load_validators
+from apps.ingestion.parsers.validation import apply_validators, default_validators
 from apps.ingestion.pipeline import run_conversion_pipeline
 from apps.ingestion.staging import (
     cleanup_staging_for_ingestion,
@@ -115,7 +112,6 @@ def _queued_ingestion(
     path = inbox / filename
     rule.data_type = data_type
     rule.chunk_size = chunk_size
-    rule.supported_formats = [path.suffix.lstrip(".").lower()]
     rule.file_pattern = f"*{path.suffix.lower()}"
     rule.save()
     return Ingestion.objects.create(
@@ -434,7 +430,7 @@ def test_daily_validation_happy_accepts_valid_row(instrument: Instrument) -> Non
     valid, rejected, duplicates = apply_validators(
         frame,
         DataType.DAILY_OHLCV,
-        load_validators(DataType.DAILY_OHLCV, None),
+        default_validators(DataType.DAILY_OHLCV),
     )
     assert len(valid) == 1
     assert rejected.empty
@@ -460,7 +456,7 @@ def test_daily_validation_negative_rejects_broken_ohlc(instrument: Instrument) -
     valid, rejected, duplicates = apply_validators(
         frame,
         DataType.DAILY_OHLCV,
-        load_validators(DataType.DAILY_OHLCV, None),
+        default_validators(DataType.DAILY_OHLCV),
     )
     assert valid.empty
     assert duplicates.empty
@@ -489,7 +485,7 @@ def test_tick_validation_happy_accepts_positive_trade(instrument: Instrument) ->
     valid, rejected, duplicates = apply_validators(
         frame,
         DataType.TICK_DATA,
-        load_validators(DataType.TICK_DATA, None),
+        default_validators(DataType.TICK_DATA),
     )
     assert len(valid) == 1
     assert rejected.empty
@@ -515,7 +511,7 @@ def test_tick_validation_negative_rejects_non_positive_price(
     valid, rejected, _duplicates = apply_validators(
         frame,
         DataType.TICK_DATA,
-        load_validators(DataType.TICK_DATA, None),
+        default_validators(DataType.TICK_DATA),
     )
     assert valid.empty
     assert "POSITIVE" in set(rejected["reason_code"])
@@ -561,63 +557,23 @@ def test_rejection_stage_negative_validation_marks_validation(
 
 
 # ---------------------------------------------------------------------------
-# Scope: Database-driven validation rule set
+# Scope: Built-in validators (stored rule sets are gone)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.django_db
-def test_rule_set_happy_loads_enabled_validators_from_db() -> None:
-    rule_set = ValidationRuleSet.objects.create(
-        name="tick-minimal",
-        data_type=DataType.TICK_DATA,
-        version="1",
-        is_active=True,
-    )
-    ValidationRule.objects.create(
-        rule_set=rule_set,
-        field_name="price",
-        validator=ValidatorType.REQUIRED,
-        sort_order=1,
-    )
-    ValidationRule.objects.create(
-        rule_set=rule_set,
-        field_name="price",
-        validator=ValidatorType.POSITIVE,
-        is_enabled=False,
-        sort_order=2,
-    )
-    rows = ValidationRule.objects.filter(rule_set=rule_set).order_by("sort_order")
-    specs = load_validators(
-        DataType.TICK_DATA,
-        [
-            {
-                "field_name": rule.field_name,
-                "validator": rule.validator,
-                "parameters": {},
-                "is_enabled": rule.is_enabled,
-            }
-            for rule in rows
-        ],
-    )
-    assert len(specs) == 1
-    assert specs[0].validator == "REQUIRED"
+def test_builtin_validators_cover_daily_and_tick_profiles() -> None:
+    daily = {spec.validator for spec in default_validators(DataType.DAILY_OHLCV)}
+    tick = {spec.validator for spec in default_validators(DataType.TICK_DATA)}
+    assert "OHLC_RELATIONSHIP" in daily
+    assert "POSITIVE" in tick
 
 
-@pytest.mark.django_db
-def test_rule_set_negative_disabled_only_falls_back_to_defaults() -> None:
-    specs = load_validators(
-        DataType.TICK_DATA,
-        [
-            {
-                "field_name": "price",
-                "validator": "POSITIVE",
-                "parameters": {},
-                "is_enabled": False,
-            }
-        ],
-    )
-    assert any(spec.validator == "REQUIRED" for spec in specs)
-    assert any(spec.validator == "POSITIVE" for spec in specs)
+def test_static_validation_rule_models_are_removed() -> None:
+    import apps.ingestion.models as ingestion_models
+
+    assert not hasattr(ingestion_models, "ValidationRuleSet")
+    assert not hasattr(ingestion_models, "ValidationRule")
+    assert not hasattr(ingestion_models, "ValidatorType")
 
 
 # ---------------------------------------------------------------------------

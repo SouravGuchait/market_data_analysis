@@ -17,7 +17,7 @@ from .normalization import (
     to_datetime_columns,
     to_numeric_columns,
 )
-from .validation import ValidatorSpec, apply_validators, load_validators
+from .validation import ValidatorSpec, apply_validators, default_validators
 
 
 @dataclass(frozen=True)
@@ -76,7 +76,7 @@ def process_staged_chunk(
     frames = list(reader)
     frame = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     normalized = normalize_dataframe(frame, data_type, schema_mapping)
-    specs = list(validators) if validators is not None else load_validators(data_type, None)
+    specs = list(validators) if validators is not None else default_validators(data_type)
     valid_df, rejected_df, duplicate_df = apply_validators(normalized, data_type, specs)
     return ProcessedChunk(
         chunk_path=chunk_path,

@@ -48,7 +48,6 @@ def _make_rule(**overrides) -> IngestionRule:
         "storage_backend": StorageBackend.LOCAL,
         "location_reference": "inbox",
         "file_pattern": "*.csv",
-        "supported_formats": ["csv"],
         "scan_interval_seconds": 60,
         "stability_policy": {
             "required_stable_scans": 2,
@@ -130,8 +129,7 @@ def test_multiple_formats_are_listed_stabilized_and_dispatched_independently(
     django_capture_on_commit_callbacks,
 ) -> None:
     rule.file_pattern = "*"
-    rule.supported_formats = ["csv", "json", "xlsx"]
-    rule.save(update_fields=["file_pattern", "supported_formats", "updated_at"])
+    rule.save(update_fields=["file_pattern", "updated_at"])
 
     names = [
         f"market-{index:02}.{extension}"

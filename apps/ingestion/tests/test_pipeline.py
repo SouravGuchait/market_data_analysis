@@ -75,7 +75,6 @@ def test_pipeline_stages_and_validates_daily_csv(
     )
     rule.data_type = DataType.DAILY_OHLCV
     rule.chunk_size = 10
-    rule.supported_formats = ["csv"]
     rule.save()
     path = inbox / "daily.csv"
     ingestion = Ingestion.objects.create(

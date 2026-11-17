@@ -3,7 +3,7 @@
 Minimal Django backend foundation for a multi-user market data analytics
 platform.
 
-This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), **SMA, EMA, and MACD** (Feature 009), **Bollinger Bands and ATR** (Feature 010), **RSI and Stochastic** (Feature 011), and **maximum drawdown** (Feature 020). Volume, price-action, and statistical indicators remain future work (Features 012–014).
+This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), **SMA, EMA, and MACD** (Feature 009), **Bollinger Bands and ATR** (Feature 010), **RSI and Stochastic** (Feature 011), **maximum drawdown** (Feature 020), and **built-in ingestion row checks** (Feature 021). Volume, price-action, and statistical indicators remain future work (Features 012–014).
 
 ## Implemented features
 
@@ -231,10 +231,264 @@ python manage.py seed_exchanges
 python manage.py seed_instruments
 python manage.py seed_market_data
 ```
+
+### Feature 005: User file management and ingestion dispatch
+
+Users upload into the local drop folder or S3. The system copies a matched file
+into that user's own `files` directory, queues it, and dispatches Celery.
+Conversion and validation are Feature 006; market-data persistence remains
+Feature 007.
+
+Upload locations, shared by whoever calls import:
+
+- Local: `sample_data` on the host, mounted in Docker as `/data/ingestion`. Put files in that folder, not under `users/`.
+- S3: `INGESTION_S3_BUCKET` and `INGESTION_S3_PREFIX`. The client does not send a bucket or a path.
+
+System store, one directory per user id, written only by import. Docker keeps it on the `mda_system` volume at `/var/lib/mda/system`, not under `sample_data`:
+
+`/var/lib/mda/system/users/<user id>/files/<filename>`
+
+Staging uses `/var/lib/mda/system/users/<user id>/staging/<ingestion id>/`. User 1 is `users/1/files`. User 2 is `users/2/files`. Import for user 2 never writes into user 1's directory, and list APIs only return the caller's rows. `storage_prefix` is accepted and stored as `files`. After a file finishes as success or partial success, the system copy and its staging directory are deleted. A failed file is kept so it can be retried.
+
+Each stored file becomes one Celery task on RabbitMQ. The worker process count is `CELERY_WORKER_CONCURRENCY` in the env file, passed to the Compose worker as `--concurrency`. The sample value is 15, so 15 files run at once and any further file stays in the queue until a process finishes. Raise or lower that number, then recreate the worker. Redis is used only as the API cache.
+
+| Call | Request | What it does |
+| --- | --- | --- |
+| `POST /api/v1/ingestion/files/import/` | JSON `{ "storage_backends": ["local", "s3"] }`. Omit the body to read local, and S3 when `INGESTION_S3_BUCKET` is set. | Reads the current contents of the local drop folder and configured S3 prefix, copies matching files into the system volume `users/<caller id>/files/`, and queues them. Source files and S3 objects are retained. Run import again after adding files; the container does not need a restart. A file with no matching rule stays in its source location. |
+| `GET /api/v1/ingestion/logs/` | No body. Optional `page` and `page_size`. | Returns accepted, rejected and duplicate counts from the ingestion log for the caller's finished files. It does not count rows in the trade or daily candle tables. |
+| Celery Beat `scan_enabled_ingestion_rules` | No HTTP body. Schedule is `INGESTION_SCAN_INTERVAL_SECONDS`. | Scans administrative rules whose owner is null. It does not scan user-owned rules. User files are queued by import. |
+
+Import queues a file when one of the caller's enabled rules matches the file name. The rule keeps its storage location, file pattern, parser config, instrument and exchange mappings, chunk size, scan interval, and stability policy. Daily names use `synthetic_market_clean_*.csv`. Tick names use `synthetic_ticks_*.csv`. `storage_prefix` is accepted and stored as `files`. Row checks are the built-in daily OHLCV and tick validators for the rule's data type.
+
+Create instruments that are not already listed. These pairs use the seeded symbols and exchanges and do not repeat an existing `(exchange, symbol)`:
+
+| symbol | exchange_code | asset_class | currency |
+| --- | --- | --- | --- |
+| ACME | XNAS | equity | USD |
+| BETA | XLON | etf | EUR |
+| CHRP | XCME | equity | GBP |
+| DLTA | XNYS | equity | JPY |
+| EPSN | XNAS | crypto | CNY |
+| FBNK | XLON | equity | CHF |
+| GLXO | XCME | etf | USD |
+| HRZN | XNYS | equity | EUR |
+| INFX | XNAS | equity | GBP |
+| JVNL | XLON | crypto | JPY |
+
+```json
+POST /api/v1/instruments/
+{
+  "exchange_code": "XNAS",
+  "symbol": "ACME",
+  "name": "Acme Industrial",
+  "asset_class": "equity",
+  "currency": "USD"
+}
+```
+
+`synthetic_market_*.csv` also copies `synthetic_market_dirty_*.csv`, which is the rejection fixture described below. Trade ids in the generator look like `ACME-2024-01-02-0000`.
+
+Drop files into `INGESTION_LOCAL_ROOT`, then:
+
+```json
+POST /api/v1/ingestion/files/import/
+{
+  "storage_backends": ["local", "s3"],
+  "storage_prefix": "files"
+}
+```
+
+Omit the body to read local files, and S3 when `INGESTION_S3_BUCKET` is set. `POST /api/v1/ingestion/{ingestion_id}/retry/` has no body. `GET /api/v1/ingestion/logs/`, `GET /api/v1/ingestion/files/`, `GET /api/v1/ingestion/rules/`, `GET /api/v1/ingestion/`, `GET /api/v1/ingestion/{id}/` and `GET /api/v1/ingestion/{id}/rejections/` have no body. List calls accept `page` and `page_size`. Ingestion list filters are query parameters: `status`, `data_type`, `rule_id`, `filename`, `start_date`, `end_date`.
+
+### Uploading the same dates again
+
+A second import of a file whose trade ids or daily candles are already stored does not insert those rows again.
+
+Tick files from an earlier run are that case. Trade ids such as `ACME-2024-01-02-0000` and the rest of that series already exist, so those 2,000 rows are duplicates. `accepted_rows` stays 0, `duplicate_rows` is 2000, and the status stays `success`. The same is true for a clean daily file whose exchange, symbol, trading date, and OHLC values already match: matching candles are duplicates and the status stays `success`.
+
+`synthetic_market_dirty_*.csv` is not a second copy of the clean file. The generator corrupts rows on purpose, and a later import of the same dates also conflicts with candles already stored. `GET /api/v1/ingestion/{id}/rejections/` then returns rows like these (`id` and `rejected_at` change per run):
+
+```json
+[
+  {
+    "source_row_number": 2,
+    "reason_code": "PERSIST_MAPPING",
+    "field_name": "",
+    "error_message": "Unable to map OHLCV row."
+  },
+  {
+    "source_row_number": 1001,
+    "reason_code": "OHLC_RELATIONSHIP",
+    "field_name": "ohlc",
+    "error_message": "Invalid OHLC relationship."
+  },
+  {
+    "source_row_number": 2001,
+    "reason_code": "NON_NEGATIVE",
+    "field_name": "volume",
+    "error_message": "volume must be >= 0."
+  },
+  {
+    "source_row_number": 4001,
+    "reason_code": "PERSIST_MAPPING",
+    "field_name": "",
+    "error_message": "Unable to map OHLCV row."
+  },
+  {
+    "source_row_number": 5001,
+    "reason_code": "PERSIST_MAPPING",
+    "field_name": "",
+    "error_message": "Unable to map OHLCV row."
+  },
+  {
+    "source_row_number": 7001,
+    "reason_code": "OHLCV_CONFLICT",
+    "field_name": "trading_date",
+    "error_message": "Existing daily candle values conflict with the source row."
+  },
+  {
+    "source_row_number": 8001,
+    "reason_code": "OHLCV_CONFLICT",
+    "field_name": "trading_date",
+    "error_message": "Existing daily candle values conflict with the source row."
+  },
+  {
+    "source_row_number": 9001,
+    "reason_code": "OHLCV_CONFLICT",
+    "field_name": "trading_date",
+    "error_message": "Existing daily candle values conflict with the source row."
+  },
+  {
+    "source_row_number": 10001,
+    "reason_code": "EXCHANGE_INSTRUMENT_MATCH",
+    "field_name": "instrument_identifier",
+    "error_message": "Exchange and instrument combination was not found."
+  }
+]
+```
+
+On a 10,000-row dirty file those source rows are the injected faults, counted with the header line:
+
+| Source row | Injected fault | Why it is rejected |
+| --- | --- | --- |
+| 2 | `volume` removed | The candle cannot be stored. `PERSIST_MAPPING`. |
+| 1001 | `high` and `low` swapped | `OHLC_RELATIONSHIP`. |
+| 2001 | negative `volume` | `NON_NEGATIVE`. |
+| 4001 | `close` null | The candle cannot be stored. `PERSIST_MAPPING`. |
+| 5001 | `volume` set to `12k` | Not a number, so the candle cannot be stored. `PERSIST_MAPPING`. |
+| 7001 | `adjusted_close` blank | The date is already stored from the clean file with a different adjusted close. `OHLCV_CONFLICT`. The stored candle is kept. |
+| 8001 | `low` driven negative | Same date already stored with different prices. `OHLCV_CONFLICT`. |
+| 9001 | `date` shifted one day | That symbol and date already has a different candle. `OHLCV_CONFLICT`. |
+| 10001 | exchange set to `ZZZZ` | No such listing. `EXCHANGE_INSTRUMENT_MATCH`. |
+
+Other dirty rows (a broken timestamp, a malformed price, plus one exact duplicate and one conflicting duplicate appended after the last row) are rejected the same way. Retrying that ingestion does not repair them. Match daily files with `synthetic_market_clean_*.csv` so `synthetic_market_dirty_*.csv` stays in the drop folder.
+
+To get new rows accepted, start the day after the last stored candle. `2027-11-02` is the next weekday after a candle stored on `2027-11-01`; use the next weekday after whatever date you actually have:
+
+```bash
+python scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 100 --seed 42 --start-date 2027-11-02
+```
+
+That command writes a new clean daily file and a new tick file. Import those. The earlier tick file, with `ACME-2024-01-02-0000` and the rest, stays a duplicate run.
+
+Administrative rules are configured in Django admin or the ORM. A rule stores
+its storage backend, relative location under `INGESTION_LOCAL_ROOT`, glob
+pattern, scan interval, stability policy, schema/instrument/exchange mappings,
+chunk size, and scan watermark/status. Local and EFS rules use the local
+filesystem adapter; the S3 choice is reserved and fails loudly until an adapter
+is added. New administrative rules default to `file_pattern="*"`. Discovery
+lists `csv`, `json`, `jsonl`, and `xlsx` files that match that pattern.
+
+Inside the Compose web container:
+
+```bash
+_mda_compose exec web python3 manage.py seed_market_data
+```
+
+`seed_market_data` seeds exchanges first, then instruments. `seed_exchanges` and
+`seed_instruments` also run on their own. `seed_instruments --count` defaults to
+the generator symbol pool. The same `--count` flag is accepted by
+`seed_market_data`. The catalog is `canonical_instruments()` in
+`scripts/generate_market_data.py`, so daily files and tick files that use those
+listings refer to the same instrument. Seeding is safe to repeat. It refreshes
+seed-controlled names, timezones, asset classes and currencies, and leaves
+`is_active` and records outside the catalog unchanged.
+
+| Method | Endpoint                                                | Purpose                                                                                                     |
+| ------ | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/v1/exchanges/`                                  | List shared exchanges. Optional `code` filter. No body.                                                   |
+| GET    | `/api/v1/instruments/`                                | List shared instruments. Filters: `exchange_code`, `symbol`, `asset_class`, `currency`, `search`. No body. |
+| POST   | `/api/v1/instruments/`                                | Create one shared instrument on an existing exchange. Body is the instrument example above.               |
+| GET    | `/api/v1/portfolios/by-name/?name=`                   | Retrieve one owned portfolio by its name.                                                                   |
+| POST   | `/api/v1/portfolios/by-name/instruments/bulk/`        | Bulk-attach instruments to an owned portfolio addressed by `name`.                                        |
+| POST   | `/api/v1/portfolios/{portfolio_id}/instruments/bulk/` | The same bulk attach, addressed by portfolio id.                                                            |
+
+The name match is case-insensitive and only searches portfolios you own. A missing name returns 404. If you have two portfolios with that same name, the response is 409 and you should use the existing id route. The bulk response includes both `name` and `portfolio_id`; each instrument line still uses `symbol` and `exchange`.
+
+`GET /api/v1/portfolios/by-name/?name=Core%20book` has no body. Bulk attach creates a missing listing when `create_if_missing` is true, then attaches it. One invalid line rolls the request back.
+
+```json
+POST /api/v1/portfolios/{portfolio_id}/instruments/bulk/
+{
+  "create_if_missing": true,
+  "instruments": [
+    {
+      "exchange_code": "XNAS",
+      "symbol": "ACME",
+      "name": "Acme Industrial",
+      "asset_class": "equity",
+      "currency": "USD",
+      "alias": "Core holding",
+      "is_active": true
+    },
+    {
+      "exchange_code": "XLON",
+      "symbol": "BETA",
+      "name": "Beta Markets",
+      "asset_class": "etf",
+      "currency": "EUR",
+      "alias": "",
+      "is_active": true
+    }
+  ]
+}
+```
+
+The by-name call uses the same `instruments` list and adds `name`:
+
+```json
+POST /api/v1/portfolios/by-name/instruments/bulk/
+{
+  "name": "Core book",
+  "create_if_missing": true,
+  "instruments": [
+    {
+      "exchange_code": "XNAS",
+      "symbol": "ACME",
+      "name": "Acme Industrial",
+      "asset_class": "equity",
+      "currency": "USD",
+      "alias": "Core holding",
+      "is_active": true
+    }
+  ]
+}
+```
+
+Portfolio creation and single-instrument attach remain the Feature 003
+endpoints. Bulk attachment is all-or-nothing: one invalid exchange, instrument
+or metadata mismatch rolls the request back. An instrument that is already
+attached is reported as `ALREADY_ATTACHED` and is not duplicated. Ingestion
+mapping resolves `exchange` plus `symbol` to the shared instrument and does not
+create a listing unless the caller explicitly opts in. Portfolio membership is
+not required for that resolution.
+
+
 ### Feature 006: Universal CSV conversion and Pandas chunk processing
 
 Every supported source (`csv`, `json`, `jsonl`, `xlsx`) is converted into bounded
-CSV staging chunks before Pandas normalization and validation. Market-data
+CSV staging chunks before Pandas normalization. Row checks use the built-in
+validators in `default_validators` for `DAILY_OHLCV` and `TICK_DATA`. Market-data
 persistence, Celery claim, Trade rows and RejectedRow storage remain Feature 007.
 
 Pipeline entry point:
@@ -375,9 +629,8 @@ Staging layout:
 
 | Function | Purpose |
 | --- | --- |
-| `ValidatorSpec` | One enabled validator from a rule-set snapshot. |
+| `ValidatorSpec` | One built-in validator applied to a normalized chunk. |
 | `default_validators` | Built-in daily OHLCV and tick validator lists. |
-| `load_validators` | Load DB rule rows or fall back to defaults. |
 | `apply_validators` | Split into valid / rejected / duplicate DataFrames. |
 | `_required` / `_numeric` / `_positive` / `_non_negative` / `_datetime` | Field validators. |
 | `_ohlc` | OHLC relationship checks. |
@@ -404,14 +657,6 @@ Staging layout:
 | `_fail_conversion` | Mark ingestion `FAILED`, record transition and audit. |
 | `_audit_conversion` | User or system audit event for conversion outcome. |
 | `load_existing_manifest` | Read an existing staging manifest. |
-
-##### `apps/ingestion/models.py` (Feature 006 additions)
-
-| Symbol | Purpose |
-| --- | --- |
-| `ValidatorType` | Allowed validator names; no arbitrary expressions. |
-| `ValidationRuleSet` | Named, versioned rule set per data type. |
-| `ValidationRule` | One enabled field/frame validator with JSON parameters. |
 
 ##### `apps/ingestion/tasks.py` (Feature 006 addition)
 
@@ -736,346 +981,6 @@ period-level `maximum_drawdown`.
 ```http
 GET /api/v1/analytics/drawdown/?instrument_symbol=ACME&exchange_code=XNYS&start_date=2024-01-01&end_date=2024-12-31
 ```
-
-### Feature 005: User file management and ingestion dispatch
-
-Users upload into the local drop folder or S3. The system copies a matched file
-into that user's own `files` directory, queues it, and dispatches Celery.
-Conversion and validation are Feature 006; market-data persistence remains
-Feature 007.
-
-Upload locations, shared by whoever calls import:
-
-- Local: `sample_data` on the host, mounted in Docker as `/data/ingestion`. Put files in that folder, not under `users/`.
-- S3: `INGESTION_S3_BUCKET` and `INGESTION_S3_PREFIX`. The client does not send a bucket or a path.
-
-System store, one directory per user id, written only by import. Docker keeps it on the `mda_system` volume at `/var/lib/mda/system`, not under `sample_data`:
-
-`/var/lib/mda/system/users/<user id>/files/<filename>`
-
-Staging uses `/var/lib/mda/system/users/<user id>/staging/<ingestion id>/`. User 1 is `users/1/files`. User 2 is `users/2/files`. Import for user 2 never writes into user 1's directory, and list APIs only return the caller's rows. `storage_prefix` is accepted and stored as `files`. After a file finishes as success or partial success, the system copy and its staging directory are deleted. A failed file is kept so it can be retried.
-
-Each stored file becomes one Celery task on RabbitMQ. The worker process count is `CELERY_WORKER_CONCURRENCY` in the env file, passed to the Compose worker as `--concurrency`. The sample value is 15, so 15 files run at once and any further file stays in the queue until a process finishes. Raise or lower that number, then recreate the worker. Redis is used only as the API cache.
-
-| Call | Request | What it does |
-| --- | --- | --- |
-| `POST /api/v1/ingestion/validation-rule-sets/` | JSON name, data type, version, and `rules`. | Creates one validation rule set. Attach its `id` when creating an ingestion rule. |
-| `POST /api/v1/ingestion/files/import/` | JSON `{ "storage_backends": ["local", "s3"] }`. Omit the body to read local, and S3 when `INGESTION_S3_BUCKET` is set. | Copies matching files from the local drop folder and S3 into the system volume `users/<caller id>/files/`, queues them, and removes the local original. A file with no matching rule stays in the drop folder. |
-| `GET /api/v1/ingestion/logs/` | No body. Optional `page` and `page_size`. | Returns accepted, rejected and duplicate counts from the ingestion log for the caller's finished files. It does not count rows in the trade or daily candle tables. |
-| `POST /api/v1/ingestion/rules/` | JSON rule body: name, data type, prefix, file pattern, parser config, optional `validation_rule_set_id`. Daily files use `synthetic_market_clean_*.csv`. Tick files use `synthetic_ticks_*.csv`. | Creates a rule owned by the authenticated user. The rule watches `users/<user id>/files/`. |
-| Celery Beat `scan_enabled_ingestion_rules` | No HTTP body. Schedule is `INGESTION_SCAN_INTERVAL_SECONDS`. | Scans administrative rules whose owner is null. It does not scan user-owned rules. User files are queued by import. |
-
-Create instruments that are not already listed, then a validation rule set, then
-the ingestion rules. These pairs use the seeded symbols and exchanges and do
-not repeat an existing `(exchange, symbol)`:
-
-| symbol | exchange_code | asset_class | currency |
-| --- | --- | --- | --- |
-| ACME | XNAS | equity | USD |
-| BETA | XLON | etf | EUR |
-| CHRP | XCME | equity | GBP |
-| DLTA | XNYS | equity | JPY |
-| EPSN | XNAS | crypto | CNY |
-| FBNK | XLON | equity | CHF |
-| GLXO | XCME | etf | USD |
-| HRZN | XNYS | equity | EUR |
-| INFX | XNAS | equity | GBP |
-| JVNL | XLON | crypto | JPY |
-
-```json
-POST /api/v1/instruments/
-{
-  "exchange_code": "XNAS",
-  "symbol": "ACME",
-  "name": "Acme Industrial",
-  "asset_class": "equity",
-  "currency": "USD"
-}
-```
-
-```json
-POST /api/v1/ingestion/validation-rule-sets/
-{
-  "name": "daily-strict",
-  "data_type": "DAILY_OHLCV",
-  "version": "2",
-  "rules": [
-    {"field_name": "exchange_identifier", "validator": "REQUIRED", "sort_order": 1},
-    {"field_name": "instrument_identifier", "validator": "REQUIRED", "sort_order": 2},
-    {"field_name": "trading_date", "validator": "REQUIRED", "sort_order": 3},
-    {"field_name": "open", "validator": "NUMERIC", "sort_order": 4},
-    {"field_name": "high", "validator": "NUMERIC", "sort_order": 5},
-    {"field_name": "low", "validator": "NUMERIC", "sort_order": 6},
-    {"field_name": "close", "validator": "NUMERIC", "sort_order": 7},
-    {"field_name": "volume", "validator": "NON_NEGATIVE", "sort_order": 8},
-    {"field_name": "", "validator": "OHLC_RELATIONSHIP", "sort_order": 9},
-    {"field_name": "", "validator": "EXCHANGE_INSTRUMENT_MATCH", "sort_order": 10},
-    {"field_name": "", "validator": "DUPLICATE_CHECK", "sort_order": 11}
-  ]
-}
-```
-
-Use the returned validation rule set id on the ingestion rule. `storage_prefix`
-is accepted and stored as `files`.
-
-Use `synthetic_market_clean_*.csv` as `file_pattern`. `synthetic_market_*.csv` also copies `synthetic_market_dirty_*.csv`, which is the rejection fixture described below.
-
-```json
-POST /api/v1/ingestion/rules/
-{
-  "name": "ohlcv-csv",
-  "data_type": "DAILY_OHLCV",
-  "storage_prefix": "files",
-  "file_pattern": "synthetic_market_clean_*.csv",
-  "chunk_size": 5000,
-  "parser_config": {"format": "csv"},
-  "instrument_mapping": {"instrument_identifier": "symbol"},
-  "exchange_mapping": {"exchange_identifier": "exchange"},
-  "validation_rule_set_id": "<daily-strict id>"
-}
-```
-
-Tick files need their own rule set and rule. Trade ids in the generator look like `ACME-2024-01-02-0000`.
-
-```json
-POST /api/v1/ingestion/validation-rule-sets/
-{
-  "name": "tick-strict",
-  "data_type": "TICK_DATA",
-  "version": "1",
-  "rules": [
-    {"field_name": "exchange_identifier", "validator": "REQUIRED", "sort_order": 1},
-    {"field_name": "instrument_identifier", "validator": "REQUIRED", "sort_order": 2},
-    {"field_name": "event_timestamp", "validator": "DATETIME", "sort_order": 3},
-    {"field_name": "price", "validator": "NUMERIC", "sort_order": 4},
-    {"field_name": "price", "validator": "POSITIVE", "sort_order": 5},
-    {"field_name": "quantity", "validator": "NUMERIC", "sort_order": 6},
-    {"field_name": "quantity", "validator": "POSITIVE", "sort_order": 7},
-    {"field_name": "", "validator": "EXCHANGE_INSTRUMENT_MATCH", "sort_order": 8},
-    {"field_name": "", "validator": "DUPLICATE_CHECK", "sort_order": 9}
-  ]
-}
-```
-
-```json
-POST /api/v1/ingestion/rules/
-{
-  "name": "ticks-csv",
-  "data_type": "TICK_DATA",
-  "storage_prefix": "files",
-  "file_pattern": "synthetic_ticks_*.csv",
-  "chunk_size": 5000,
-  "parser_config": {"format": "csv"},
-  "instrument_mapping": {"instrument_identifier": "symbol"},
-  "exchange_mapping": {"exchange_identifier": "exchange"},
-  "validation_rule_set_id": "<tick-strict id>"
-}
-```
-
-If a rule was already created with `synthetic_market_*.csv`, narrow it. Only fields you send are changed:
-
-```json
-PATCH /api/v1/ingestion/rules/{rule_id}/
-{
-  "file_pattern": "synthetic_market_clean_*.csv"
-}
-```
-
-Drop files into `INGESTION_LOCAL_ROOT`, then:
-
-```json
-POST /api/v1/ingestion/files/import/
-{
-  "storage_backends": ["local", "s3"],
-  "storage_prefix": "files"
-}
-```
-
-Omit the body to read local files, and S3 when `INGESTION_S3_BUCKET` is set. `POST /api/v1/ingestion/{ingestion_id}/retry/` has no body. `GET /api/v1/ingestion/logs/`, `GET /api/v1/ingestion/files/`, `GET /api/v1/ingestion/rules/`, `GET /api/v1/ingestion/`, `GET /api/v1/ingestion/{id}/` and `GET /api/v1/ingestion/{id}/rejections/` have no body. List calls accept `page` and `page_size`. Ingestion list filters are query parameters: `status`, `data_type`, `rule_id`, `filename`, `start_date`, `end_date`.
-
-### Uploading the same dates again
-
-A second import of a file whose trade ids or daily candles are already stored does not insert those rows again.
-
-Tick files from an earlier run are that case. Trade ids such as `ACME-2024-01-02-0000` and the rest of that series already exist, so those 2,000 rows are duplicates. `accepted_rows` stays 0, `duplicate_rows` is 2000, and the status stays `success`. The same is true for a clean daily file whose exchange, symbol, trading date, and OHLC values already match: matching candles are duplicates and the status stays `success`.
-
-`synthetic_market_dirty_*.csv` is not a second copy of the clean file. The generator corrupts rows on purpose, and a later import of the same dates also conflicts with candles already stored. `GET /api/v1/ingestion/{id}/rejections/` then returns rows like these (`id` and `rejected_at` change per run):
-
-```json
-[
-  {
-    "source_row_number": 2,
-    "reason_code": "PERSIST_MAPPING",
-    "field_name": "",
-    "error_message": "Unable to map OHLCV row."
-  },
-  {
-    "source_row_number": 1001,
-    "reason_code": "OHLC_RELATIONSHIP",
-    "field_name": "ohlc",
-    "error_message": "Invalid OHLC relationship."
-  },
-  {
-    "source_row_number": 2001,
-    "reason_code": "NON_NEGATIVE",
-    "field_name": "volume",
-    "error_message": "volume must be >= 0."
-  },
-  {
-    "source_row_number": 4001,
-    "reason_code": "PERSIST_MAPPING",
-    "field_name": "",
-    "error_message": "Unable to map OHLCV row."
-  },
-  {
-    "source_row_number": 5001,
-    "reason_code": "PERSIST_MAPPING",
-    "field_name": "",
-    "error_message": "Unable to map OHLCV row."
-  },
-  {
-    "source_row_number": 7001,
-    "reason_code": "OHLCV_CONFLICT",
-    "field_name": "trading_date",
-    "error_message": "Existing daily candle values conflict with the source row."
-  },
-  {
-    "source_row_number": 8001,
-    "reason_code": "OHLCV_CONFLICT",
-    "field_name": "trading_date",
-    "error_message": "Existing daily candle values conflict with the source row."
-  },
-  {
-    "source_row_number": 9001,
-    "reason_code": "OHLCV_CONFLICT",
-    "field_name": "trading_date",
-    "error_message": "Existing daily candle values conflict with the source row."
-  },
-  {
-    "source_row_number": 10001,
-    "reason_code": "EXCHANGE_INSTRUMENT_MATCH",
-    "field_name": "instrument_identifier",
-    "error_message": "Exchange and instrument combination was not found."
-  }
-]
-```
-
-On a 10,000-row dirty file those source rows are the injected faults, counted with the header line:
-
-| Source row | Injected fault | Why it is rejected |
-| --- | --- | --- |
-| 2 | `volume` removed | The candle cannot be stored. `PERSIST_MAPPING`. |
-| 1001 | `high` and `low` swapped | `OHLC_RELATIONSHIP`. |
-| 2001 | negative `volume` | `NON_NEGATIVE`. |
-| 4001 | `close` null | The candle cannot be stored. `PERSIST_MAPPING`. |
-| 5001 | `volume` set to `12k` | Not a number, so the candle cannot be stored. `PERSIST_MAPPING`. |
-| 7001 | `adjusted_close` blank | The date is already stored from the clean file with a different adjusted close. `OHLCV_CONFLICT`. The stored candle is kept. |
-| 8001 | `low` driven negative | Same date already stored with different prices. `OHLCV_CONFLICT`. |
-| 9001 | `date` shifted one day | That symbol and date already has a different candle. `OHLCV_CONFLICT`. |
-| 10001 | exchange set to `ZZZZ` | No such listing. `EXCHANGE_INSTRUMENT_MATCH`. |
-
-Other dirty rows (a broken timestamp, a malformed price, plus one exact duplicate and one conflicting duplicate appended after the last row) are rejected the same way. Retrying that ingestion does not repair them. Leave `synthetic_market_dirty_*.csv` in the drop folder by using the clean-file pattern above.
-
-To get new rows accepted, start the day after the last stored candle. `2027-11-02` is the next weekday after a candle stored on `2027-11-01`; use the next weekday after whatever date you actually have:
-
-```bash
-python scripts/generate_market_data.py --symbols 10 --exponent 4 --ticks-per-day 100 --seed 42 --start-date 2027-11-02
-```
-
-That command writes a new clean daily file and a new tick file. Import those. The earlier tick file, with `ACME-2024-01-02-0000` and the rest, stays a duplicate run.
-
-Administrative rules are configured in Django admin or the ORM. A rule stores
-its storage backend, relative location under `INGESTION_LOCAL_ROOT`, glob
-pattern, supported formats, scan interval, stability policy,
-schema/instrument/exchange mappings, and scan watermark/status. Local and EFS
-rules use the local filesystem adapter; the S3 choice is reserved and fails
-loudly until an adapter is added. New administrative rules default to
-`file_pattern="*"` and the supported formats `csv`, `json` and `xlsx`.
-
-Inside the Compose web container:
-
-```bash
-_mda_compose exec web python3 manage.py seed_market_data
-```
-
-`seed_market_data` seeds exchanges first, then instruments. `seed_exchanges` and
-`seed_instruments` also run on their own. `seed_instruments --count` defaults to
-the generator symbol pool. The same `--count` flag is accepted by
-`seed_market_data`. The catalog is `canonical_instruments()` in
-`scripts/generate_market_data.py`, so daily files and tick files that use those
-listings refer to the same instrument. Seeding is safe to repeat. It refreshes
-seed-controlled names, timezones, asset classes and currencies, and leaves
-`is_active` and records outside the catalog unchanged.
-
-| Method | Endpoint                                                | Purpose                                                                                                     |
-| ------ | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| GET    | `/api/v1/exchanges/`                                  | List shared exchanges. Optional `code` filter. No body.                                                   |
-| GET    | `/api/v1/instruments/`                                | List shared instruments. Filters: `exchange_code`, `symbol`, `asset_class`, `currency`, `search`. No body. |
-| POST   | `/api/v1/instruments/`                                | Create one shared instrument on an existing exchange. Body is the instrument example above.               |
-| GET    | `/api/v1/portfolios/by-name/?name=`                   | Retrieve one owned portfolio by its name.                                                                   |
-| POST   | `/api/v1/portfolios/by-name/instruments/bulk/`        | Bulk-attach instruments to an owned portfolio addressed by `name`.                                        |
-| POST   | `/api/v1/portfolios/{portfolio_id}/instruments/bulk/` | The same bulk attach, addressed by portfolio id.                                                            |
-
-The name match is case-insensitive and only searches portfolios you own. A missing name returns 404. If you have two portfolios with that same name, the response is 409 and you should use the existing id route. The bulk response includes both `name` and `portfolio_id`; each instrument line still uses `symbol` and `exchange`.
-
-`GET /api/v1/portfolios/by-name/?name=Core%20book` has no body. Bulk attach creates a missing listing when `create_if_missing` is true, then attaches it. One invalid line rolls the request back.
-
-```json
-POST /api/v1/portfolios/{portfolio_id}/instruments/bulk/
-{
-  "create_if_missing": true,
-  "instruments": [
-    {
-      "exchange_code": "XNAS",
-      "symbol": "ACME",
-      "name": "Acme Industrial",
-      "asset_class": "equity",
-      "currency": "USD",
-      "alias": "Core holding",
-      "is_active": true
-    },
-    {
-      "exchange_code": "XLON",
-      "symbol": "BETA",
-      "name": "Beta Markets",
-      "asset_class": "etf",
-      "currency": "EUR",
-      "alias": "",
-      "is_active": true
-    }
-  ]
-}
-```
-
-The by-name call uses the same `instruments` list and adds `name`:
-
-```json
-POST /api/v1/portfolios/by-name/instruments/bulk/
-{
-  "name": "Core book",
-  "create_if_missing": true,
-  "instruments": [
-    {
-      "exchange_code": "XNAS",
-      "symbol": "ACME",
-      "name": "Acme Industrial",
-      "asset_class": "equity",
-      "currency": "USD",
-      "alias": "Core holding",
-      "is_active": true
-    }
-  ]
-}
-```
-
-Portfolio creation and single-instrument attach remain the Feature 003
-endpoints. Bulk attachment is all-or-nothing: one invalid exchange, instrument
-or metadata mismatch rolls the request back. An instrument that is already
-attached is reported as `ALREADY_ATTACHED` and is not duplicated. Ingestion
-mapping resolves `exchange` plus `symbol` to the shared instrument and does not
-create a listing unless the caller explicitly opts in. Portfolio membership is
-not required for that resolution.
-
 ## Project layout
 
 ```text
@@ -1088,7 +993,7 @@ not required for that resolution.
 │   ├── audit/             # Append-only user and system audit records
 │   ├── common/            # Health, logging and middleware
 │   ├── exchanges/         # Exchange master data
-│   ├── ingestion/         # Rules, storage, converters, staging, validation pipeline
+│   ├── ingestion/         # Storage, discovery, converters, staging, built-in row checks
 │   │   ├── converters/    # CSV/JSON/JSONL/XLSX → staging CSV chunks
 │   │   ├── parsers/       # Column map, normalization, validators, chunk processor
 │   │   ├── pipeline.py    # run_conversion_pipeline orchestration

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -273,12 +274,25 @@ class LocalStorageAdapter:
         except OSError as exc:
             raise StorageUnavailableError("Unable to create the storage directory.") from exc
 
-    def save(self, source: ByteStream, storage_key: str, *, max_bytes: int) -> StorageObject:
+    def save(
+        self,
+        source: ByteStream,
+        storage_key: str,
+        *,
+        max_bytes: int,
+        modified_at: datetime | None = None,
+    ) -> StorageObject:
         """Store a stream at a relative key and return its metadata."""
 
         self._prepare_root()
         path = self._resolve_key(storage_key)
         _write_limited(path, source, max_bytes)
+        if modified_at is not None:
+            try:
+                timestamp = modified_at.timestamp()
+                os.utime(path, (timestamp, timestamp))
+            except (OverflowError, OSError, ValueError) as exc:
+                raise StorageError("Unable to preserve the source modification time.") from exc
         return self._as_object(path)
 
     def _prepare_root(self) -> None:

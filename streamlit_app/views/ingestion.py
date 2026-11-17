@@ -10,64 +10,18 @@ from streamlit_app.api import endpoints
 from streamlit_app.session import api_client
 from streamlit_app.views.helpers import as_list, as_mapping, page_results, run_api
 
-# Mirrors apps.ingestion.models.ValidatorType and parsers.profiles column sets.
-VALIDATORS = (
-    "REQUIRED",
-    "NUMERIC",
-    "POSITIVE",
-    "NON_NEGATIVE",
-    "MIN_VALUE",
-    "MAX_VALUE",
-    "MAX_DECIMAL_PLACES",
-    "DATETIME",
-    "ENUM",
-    "OHLC_RELATIONSHIP",
-    "INSTRUMENT_EXISTS",
-    "EXCHANGE_EXISTS",
-    "EXCHANGE_INSTRUMENT_MATCH",
-    "DUPLICATE_CHECK",
-)
-DAILY_FIELDS = (
-    "exchange_identifier",
-    "instrument_identifier",
-    "instrument_name",
-    "asset_class",
-    "currency",
-    "trading_date",
-    "timestamp",
-    "open",
-    "high",
-    "low",
-    "close",
-    "adjusted_close",
-    "volume",
-)
-TICK_FIELDS = (
-    "exchange_identifier",
-    "instrument_identifier",
-    "event_timestamp",
-    "price",
-    "quantity",
-    "exchange_trade_id",
-    "sequence_number",
-    "side",
-    "source_metadata",
-    "deduplication_key",
-)
 DATA_TYPES = ("DAILY_OHLCV", "TICK_DATA")
 
 
 def render_ingestion() -> None:
     st.title("Ingestion")
-    tabs = st.tabs(["Monitor", "Validation rules", "Ingestion rules", "Import"])
+    tabs = st.tabs(["Monitor", "Ingestion rules", "Import"])
     client = api_client()
     with tabs[0]:
         _monitor(client)
     with tabs[1]:
-        _validation_rules(client)
-    with tabs[2]:
         _ingestion_rules(client)
-    with tabs[3]:
+    with tabs[2]:
         _import_files(client)
     client.close()
 
@@ -78,125 +32,170 @@ def _monitor(client: object) -> None:
     assert isinstance(client, ApiClient)
     payload = run_api(
         client,
-        lambda: endpoints.get_json(client, "/api/v1/ingestion/", {"page_size": 20}),
+        lambda: endpoints.get_json(client, "/api/v1/ingestion/", {"page_size": 100}),
     )
     rows = page_results(payload) if payload is not None else []
-    st.dataframe(
-        [
-            {
-                "file": row.get("file_name") or row.get("filename"),
-                "uuid": row.get("id"),
-                "status": row.get("state") or row.get("status"),
-                "accepted": row.get("accepted_rows"),
-                "rejected": row.get("rejected_rows"),
-                "duplicates": row.get("duplicate_rows"),
-                "error": row.get("error_summary"),
-            }
-            for row in rows
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
     if not rows:
+        st.info("No ingestion files yet.")
         return
-    selected = st.selectbox("Inspect ingestion", [str(row.get("id")) for row in rows])
-    if st.button("Show rejections"):
-        rejections = run_api(
-            client,
-            lambda: endpoints.get_json(client, f"/api/v1/ingestion/{selected}/rejections/"),
-        )
-        st.dataframe(page_results(rejections) if rejections is not None else [], hide_index=True)
-    if st.button("Retry selected"):
-        result = run_api(
-            client,
-            lambda: endpoints.post_json(client, f"/api/v1/ingestion/{selected}/retry/", {}),
-        )
-        if result is not None:
-            st.success("Retry requested.")
+
+    sections = _status_sections(rows)
+    tabs = st.tabs(list(sections))
+    for tab, (label, section_rows) in zip(tabs, sections.items(), strict=True):
+        with tab:
+            if section_rows:
+                st.dataframe(
+                    _ingestion_table(section_rows), use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("No files in this section.")
+            if label == "Accepted rows":
+                st.caption("Accepted rows are shown as per-file counts in the ingestion log.")
+            if label == "Rejected rows" and section_rows:
+                _show_rejections(client, section_rows)
+            if label == "All files":
+                _retry_control(client, rows)
 
 
-def _validation_rules(client: object) -> None:
+def _status_sections(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, list[Mapping[str, object]]]:
+    return {
+        "All files": list(rows),
+        "Accepted rows": [row for row in rows if _row_count(row, "accepted_rows") > 0],
+        "Rejected rows": [row for row in rows if _row_count(row, "rejected_rows") > 0],
+        "In progress": [
+            row
+            for row in rows
+            if str(row.get("status") or row.get("state") or "").lower()
+            in {"discovered", "queued", "processing", "retrying"}
+        ],
+        "Failed": [
+            row
+            for row in rows
+            if str(row.get("status") or row.get("state") or "").lower() == "failed"
+        ],
+    }
+
+
+def _row_count(row: Mapping[str, object], field: str) -> int:
+    value = row.get(field)
+    if not isinstance(value, int | str):
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
+def _ingestion_table(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "file": row.get("filename") or row.get("file_name"),
+            "ingestion_id": row.get("id"),
+            "status": row.get("status") or row.get("state"),
+            "rows_read": row.get("rows_read"),
+            "accepted_rows": row.get("accepted_rows"),
+            "rejected_rows": row.get("rejected_rows"),
+            "duplicates": row.get("duplicate_rows"),
+            "completed_at": row.get("completed_at"),
+            "error": row.get("error_summary"),
+        }
+        for row in rows
+    ]
+
+
+def _show_rejections(client: object, rows: Sequence[Mapping[str, object]]) -> None:
     from streamlit_app.api.client import ApiClient
 
     assert isinstance(client, ApiClient)
-    existing = run_api(
-        client,
-        lambda: endpoints.get_json(client, "/api/v1/ingestion/validation-rule-sets/"),
-    )
-    rows = page_results(existing) if existing is not None else []
-    st.subheader("Existing rule sets")
-    st.dataframe(rows, hide_index=True)
-    st.subheader("Create rule set")
-    st.caption("Name + version must be unique. Bump version to add another set with the same name.")
-    name = st.text_input("Name", key="vrs_name")
-    data_type = st.selectbox("Data type", list(DATA_TYPES), key="vrs_data_type")
-    version = st.text_input("Version", value="1", key="vrs_version")
-    fields = _fields_for_data_type(data_type)
-    field_options = _field_options(rows, fields)
-    field_name = st.selectbox("Field name", field_options, key="vrs_field_name")
-    validator = st.selectbox("Validator", list(VALIDATORS), key="vrs_validator")
-    sort_order = st.number_input("Sort order", min_value=0, value=1, key="vrs_sort")
-    if not st.button("Create", type="primary", key="vrs_create"):
-        return
-    body = {
-        "name": name.strip(),
-        "data_type": data_type,
-        "version": version.strip() or "1",
-        "rules": [
-            {
-                "field_name": field_name,
-                "validator": validator,
-                "sort_order": int(sort_order),
-            }
-        ],
+    file_names = {
+        str(row.get("id")): str(row.get("filename") or row.get("file_name") or "Unknown file")
+        for row in rows
+        if row.get("id")
     }
+    selected = st.selectbox(
+        "Rejected rows for file",
+        list(file_names),
+        format_func=lambda ingestion_id: f"{file_names[ingestion_id]} ({ingestion_id[:8]})",
+        key="ingestion_rejection_file",
+    )
+    page = int(
+        st.number_input(
+            "Rejected row page",
+            min_value=1,
+            value=1,
+            step=1,
+            key=f"rejection_page_{selected}",
+        )
+    )
+    if not st.button("Load rejected rows", key="load_ingestion_rejections"):
+        return
+    rejections = run_api(
+        client,
+        lambda: endpoints.get_json(
+            client,
+            f"/api/v1/ingestion/{selected}/rejections/",
+            {"page": page, "page_size": 100},
+        ),
+    )
+    rejection_rows = page_results(rejections) if rejections is not None else []
+    st.dataframe(
+        _rejection_table(rejection_rows),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+def _rejection_table(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    return [
+        {
+            "source_row": row.get("source_row_number"),
+            "reason": row.get("reason_code"),
+            "field": row.get("field_name"),
+            "error": row.get("error_message"),
+            "rejected_at": row.get("rejected_at"),
+        }
+        for row in rows
+    ]
+
+
+def _retry_control(client: object, rows: Sequence[Mapping[str, object]]) -> None:
+    from streamlit_app.api.client import ApiClient
+
+    assert isinstance(client, ApiClient)
+    labels = {
+        str(row.get("id")): str(row.get("filename") or row.get("file_name") or "Unknown file")
+        for row in rows
+        if row.get("id")
+    }
+    if not labels:
+        return
+    selected = st.selectbox(
+        "Retry file",
+        list(labels),
+        format_func=lambda ingestion_id: f"{labels[ingestion_id]} ({ingestion_id[:8]})",
+        key="retry_ingestion_file",
+    )
+    if not st.button("Retry selected", key="retry_ingestion"):
+        return
     result = run_api(
         client,
-        lambda: endpoints.post_json(client, "/api/v1/ingestion/validation-rule-sets/", body),
+        lambda: endpoints.post_json(client, f"/api/v1/ingestion/{selected}/retry/", {}),
     )
     if result is not None:
-        st.success("Validation rule set created.")
-        st.rerun()
-
-
-def _fields_for_data_type(data_type: object) -> tuple[str, ...]:
-    return TICK_FIELDS if data_type == "TICK_DATA" else DAILY_FIELDS
-
-
-def _field_options(
-    existing_sets: Sequence[Mapping[str, object]],
-    canonical: Sequence[str],
-) -> list[str]:
-    seen: list[str] = list(canonical)
-    for rule_set in existing_sets:
-        for rule in as_list(rule_set.get("rules")):
-            if not isinstance(rule, Mapping):
-                continue
-            field = rule.get("field_name")
-            if isinstance(field, str) and field and field not in seen:
-                seen.append(field)
-    return seen
+        st.success("Retry requested.")
 
 
 def _ingestion_rules(client: object) -> None:
     from streamlit_app.api.client import ApiClient
 
     assert isinstance(client, ApiClient)
-    sets = run_api(
-        client,
-        lambda: endpoints.get_json(client, "/api/v1/ingestion/validation-rule-sets/"),
-    )
-    set_rows = page_results(sets) if sets is not None else []
-    set_labels = {f"{row.get('name')}@{row.get('version')}": str(row.get("id")) for row in set_rows}
     rules = run_api(client, lambda: endpoints.get_json(client, "/api/v1/ingestion/rules/"))
     st.subheader("Existing rules")
     st.dataframe(page_results(rules) if rules is not None else [], hide_index=True)
-    if not set_labels:
-        st.warning("Create a validation rule set before an ingestion rule.")
-        return
     name = st.text_input("Rule name", key="ing_rule_name")
     data_type = st.selectbox("Data type", list(DATA_TYPES), key="rule_dt")
-    vrs = st.selectbox("Validation rule set", list(set_labels), key="ing_rule_vrs")
     pattern = st.text_input("File pattern", value="synthetic_market_clean_*.csv", key="ing_pat")
     chunk_size = st.number_input("Chunk size", min_value=1, value=5000, key="ing_chunk")
     if not st.button("Create rule", type="primary", key="ing_rule_create"):
@@ -210,7 +209,6 @@ def _ingestion_rules(client: object) -> None:
         "parser_config": {"format": "csv"},
         "instrument_mapping": {"instrument_identifier": "symbol"},
         "exchange_mapping": {"exchange_identifier": "exchange"},
-        "validation_rule_set_id": set_labels[vrs],
     }
     result = run_api(client, lambda: endpoints.post_json(client, "/api/v1/ingestion/rules/", body))
     if result is not None:
@@ -262,4 +260,43 @@ def _show_import_result(result: object) -> None:
         )
     else:
         st.info(f"Nothing new stored. Skipped {len(skipped)} file(s).")
-    st.json(data)
+    stored_rows = page_results(stored)
+    if stored_rows:
+        st.subheader("Stored files")
+        st.dataframe(
+            [
+                {
+                    "file": row.get("original_filename"),
+                    "backend": row.get("storage_backend"),
+                    "format": row.get("detected_format"),
+                    "size_bytes": row.get("file_size"),
+                    "uploaded_at": row.get("uploaded_at"),
+                }
+                for row in stored_rows
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+    skipped_rows = page_results(skipped)
+    if skipped_rows:
+        st.subheader("Skipped files")
+        st.dataframe(
+            [{"file": row.get("name"), "reason": row.get("reason")} for row in skipped_rows],
+            use_container_width=True,
+            hide_index=True,
+        )
+    queued_rows = page_results(queued)
+    if queued_rows:
+        st.subheader("Queued files")
+        st.dataframe(
+            [
+                {
+                    "file": row.get("name"),
+                    "ingestion_id": row.get("id"),
+                    "rule_id": row.get("rule_id"),
+                }
+                for row in queued_rows
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
