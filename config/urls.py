@@ -20,6 +20,7 @@ urlpatterns = [
     path(prefix + "exchanges/", include("apps.exchanges.urls")),
     path(prefix + "instruments/", include("apps.instruments.urls")),
     path(prefix + "ingestion/", include("apps.ingestion.urls")),
+    path(prefix + "rules/", include("apps.validation_rules.urls")),
     path(prefix + "portfolios/", include("apps.portfolios.urls")),
     path(prefix + "analytics/", include("apps.analytics.urls")),
     path(prefix + "dashboard/", include("apps.dashboard.urls")),
