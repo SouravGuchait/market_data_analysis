@@ -64,7 +64,7 @@ def _call(target: object, method_name: str, /, *args: str, **kwargs: str) -> obj
     if not callable(method):
         raise StorageError("The S3 client does not provide the requested operation.")
     result = method(*args, **kwargs)
-    return result if result else {}
+    return result or {}
 
 def _iter_pages(pages: Iterable[object]) -> Iterator[object]:
     """Yield listing pages, translating failures raised lazily during iteration."""

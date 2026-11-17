@@ -1,4 +1,4 @@
-"""S3 listing, object reads and botocore error translation."""
+"""S3 listing and object reads; botocore failures propagate unchanged."""
 
 from __future__ import annotations
 
@@ -65,8 +65,11 @@ class _ObjectClient:
 
 
 class _FailingBody:
+    def __init__(self, error: BotoCoreError | ClientError) -> None:
+        self._error = error
+
     def read(self, size: int = -1) -> bytes:
-        raise _client_error("RequestTimeout")
+        raise self._error
 
 
 @pytest.fixture
@@ -99,65 +102,89 @@ def test_listing_uses_the_configured_bucket_and_prefix() -> None:
     assert client.requests == [{"Bucket": BUCKET, "Prefix": f"{PREFIX}/"}]
 
 
+def test_listing_requires_a_bucket(settings) -> None:
+    settings.INGESTION_S3_BUCKET = ""
+
+    with pytest.raises(StorageUnavailableError):
+        list_remote_objects()
+
+
 @pytest.mark.usefixtures("s3_settings")
-def test_listing_translates_access_denied() -> None:
-    client = _ListingClient(_pages_raising(_client_error("AccessDenied")))
+def test_listing_propagates_access_denied() -> None:
+    error = _client_error("AccessDenied")
+    client = _ListingClient(_pages_raising(error))
 
     with (
         patch("apps.ingestion.s3_source._client", return_value=client),
-        pytest.raises(StorageError) as raised,
+        pytest.raises(ClientError) as raised,
     ):
         list_remote_objects()
 
-    assert str(raised.value) == "S3 denied access to the configured location."
+    assert raised.value is error
 
 
 @pytest.mark.usefixtures("s3_settings")
-def test_listing_translates_missing_credentials() -> None:
-    client = _ListingClient(_pages_raising(NoCredentialsError()))
+def test_listing_propagates_missing_credentials() -> None:
+    error = NoCredentialsError()
+    client = _ListingClient(_pages_raising(error))
 
     with (
         patch("apps.ingestion.s3_source._client", return_value=client),
-        pytest.raises(StorageError) as raised,
+        pytest.raises(NoCredentialsError) as raised,
     ):
         list_remote_objects()
 
-    assert str(raised.value) == "The S3 request could not be completed."
+    assert raised.value is error
 
 
 @pytest.mark.usefixtures("s3_settings")
-def test_listing_reports_an_unhandled_client_error_code() -> None:
-    client = _ListingClient(_pages_raising(_client_error("InvalidAccessKeyId")))
+def test_listing_propagates_an_unhandled_client_error_code() -> None:
+    error = _client_error("InvalidAccessKeyId")
+    client = _ListingClient(_pages_raising(error))
 
     with (
         patch("apps.ingestion.s3_source._client", return_value=client),
-        pytest.raises(StorageError) as raised,
+        pytest.raises(ClientError) as raised,
     ):
         list_remote_objects()
 
-    assert str(raised.value) == "The S3 request failed with InvalidAccessKeyId."
+    assert raised.value is error
 
 
 @pytest.mark.usefixtures("s3_settings")
-def test_open_translates_a_missing_object() -> None:
-    client = _ObjectClient(_client_error("NoSuchKey"))
+def test_open_propagates_a_missing_object() -> None:
+    error = _client_error("NoSuchKey")
+    client = _ObjectClient(error)
 
     with (
         patch("apps.ingestion.s3_source._client", return_value=client),
-        pytest.raises(StorageUnavailableError),
+        pytest.raises(ClientError) as raised,
     ):
         open_remote_object(f"{PREFIX}/gone.csv")
 
+    assert raised.value is error
     assert client.requests == [{"Bucket": BUCKET, "Key": f"{PREFIX}/gone.csv"}]
 
 
 @pytest.mark.usefixtures("s3_settings")
-def test_open_translates_a_failing_body_read() -> None:
-    client = _ObjectClient({"Body": _FailingBody()})
+def test_open_rejects_a_body_without_read() -> None:
+    client = _ObjectClient({"Body": object()})
+
+    with (
+        patch("apps.ingestion.s3_source._client", return_value=client),
+        pytest.raises(StorageError),
+    ):
+        open_remote_object(f"{PREFIX}/a.csv")
+
+
+@pytest.mark.usefixtures("s3_settings")
+def test_open_propagates_a_failing_body_read() -> None:
+    error = _client_error("RequestTimeout")
+    client = _ObjectClient({"Body": _FailingBody(error)})
 
     with patch("apps.ingestion.s3_source._client", return_value=client):
         stream = open_remote_object(f"{PREFIX}/a.csv")
-        with pytest.raises(StorageError) as raised:
+        with pytest.raises(ClientError) as raised:
             stream.read(16)
 
-    assert str(raised.value) == "The S3 request failed with RequestTimeout."
+    assert raised.value is error
