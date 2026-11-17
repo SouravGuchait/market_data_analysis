@@ -21,6 +21,18 @@ def request_timeout_seconds() -> float:
 
 
 @lru_cache(maxsize=1)
+def import_timeout_seconds() -> float:
+    """Longer timeout for imports that download many objects before responding."""
+
+    raw = os.environ.get("MDA_IMPORT_TIMEOUT_SECONDS", "600")
+    try:
+        configured = float(raw)
+    except ValueError:
+        configured = 600.0
+    return max(configured, request_timeout_seconds(), 1.0)
+
+
+@lru_cache(maxsize=1)
 def reference_cache_ttl_seconds() -> int:
     raw = os.environ.get("STREAMLIT_REFERENCE_CACHE_TTL", "300")
     try:

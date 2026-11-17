@@ -31,9 +31,9 @@ _mda_project_dir=$quoted_project
 _mda_env_file=$quoted_env
 
 _mda_compose() {
-  # Shell exports override --env-file. Drop stale Celery URLs so the env file wins.
   env -u CELERY_BROKER_URL -u COMPOSE_CELERY_BROKER_URL \\
     -u CELERY_RESULT_BACKEND -u COMPOSE_CELERY_RESULT_BACKEND \\
+    -u INGESTION_S3_BUCKET -u INGESTION_S3_PREFIX -u INGESTION_S3_REGION \\
     docker compose --project-directory "\$_mda_project_dir" \\
     --env-file "\$_mda_env_file" \\
     -f "\$_mda_project_dir/docker-compose.yml" "\$@"

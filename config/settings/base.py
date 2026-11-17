@@ -114,6 +114,7 @@ INSTALLED_APPS = [
     "apps.audit",
     "apps.dashboard",
     "django_zxcvbn_password_validator",
+    "storages",
 ]
 
 if ENABLE_VALIDATION_RULES:
@@ -255,11 +256,15 @@ INGESTION_TASK_TIME_LIMIT_SECONDS = max(
     INGESTION_TASK_SOFT_TIME_LIMIT_SECONDS + 30,
     env_int("INGESTION_TASK_TIME_LIMIT_SECONDS", 2100),
 )
+
 INGESTION_S3_BUCKET = os.getenv("INGESTION_S3_BUCKET", "").strip()
-INGESTION_S3_PREFIX = os.getenv("INGESTION_S3_PREFIX", "").strip().strip("/")
+INGESTION_S3_PREFIX = os.getenv("INGESTION_S3_PREFIX", "").strip()
 INGESTION_S3_REGION = os.getenv("INGESTION_S3_REGION", "").strip()
 API_PREFIX = "api/v1/"
-
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "storages.backends.s3boto3.S3StaticStorage"},
+}
 # ---------------------------------------------------------------------------
 # DRF / OpenAPI
 # ---------------------------------------------------------------------------

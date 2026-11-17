@@ -26,6 +26,7 @@ class RequestOptions:
     params: Mapping[str, object] | None = None
     auth: bool = True
     retry: bool = True
+    timeout: float | None = None
 
 
 def _envelope_data(payload: Mapping[str, object]) -> object:
@@ -128,6 +129,9 @@ class ApiClient:
                 headers=headers,
                 json=dict(options.json_body) if options.json_body is not None else None,
                 params=params,
+                timeout=(
+                    options.timeout if options.timeout is not None else request_timeout_seconds()
+                ),
             )
         except httpx.HTTPError as exc:
             logger.warning("API transport error for %s %s", options.method, options.path)

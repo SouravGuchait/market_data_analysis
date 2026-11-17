@@ -145,3 +145,33 @@ def test_auth_required_without_token() -> None:
     with pytest.raises(AuthExpiredError):
         api.request(RequestOptions(method="GET", path="/api/v1/auth/me/"))
     api.close()
+
+
+def test_request_timeout_override_is_forwarded(client: ApiClient) -> None:
+    seen: list[object] = []
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        seen.append(request.extensions.get("timeout"))
+        return httpx.Response(
+            200,
+            json={"success": True, "message": "ok", "data": {}, "errors": None},
+        )
+
+    client._client.close()
+    client._client = httpx.Client(
+        transport=httpx.MockTransport(_capture),
+        base_url="http://testserver",
+    )
+    client.request(
+        RequestOptions(
+            method="POST",
+            path="/api/v1/ingestion/files/import/",
+            json_body={},
+            auth=False,
+            timeout=987.0,
+        )
+    )
+    assert seen
+    timeout = seen[0]
+    assert isinstance(timeout, dict)
+    assert timeout.get("read") == 987.0

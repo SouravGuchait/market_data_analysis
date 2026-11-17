@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 import streamlit as st
 
 from streamlit_app.api import endpoints
+from streamlit_app.config import import_timeout_seconds
 from streamlit_app.session import api_client
 from streamlit_app.views.helpers import as_list, as_mapping, page_results, run_api
 
@@ -239,17 +240,26 @@ def _import_files(client: object) -> None:
         }
         result = run_api(
             client,
-            lambda: endpoints.post_json(client, "/api/v1/ingestion/files/import/", dict(body)),
+            lambda: endpoints.post_json(
+                client,
+                "/api/v1/ingestion/files/import/",
+                dict(body),
+                timeout=import_timeout_seconds(),
+            ),
         )
         if result is not None:
-            _show_import_result(result)
+            _show_import_result(result, backends)
 
 
-def _show_import_result(result: object) -> None:
+def _show_import_result(result: object, backends: Sequence[str] = ()) -> None:
     data = as_mapping(result) if isinstance(result, Mapping) else {}
     stored = as_list(data.get("stored"))
     skipped = as_list(data.get("skipped"))
     queued = as_list(data.get("queued"))
+    scanned_value = data.get("scanned")
+    scanned = as_mapping(scanned_value) if isinstance(scanned_value, Mapping) else {}
+    local_files = _scanned_count(scanned, "local")
+    s3_files = _scanned_count(scanned, "s3")
     if queued:
         st.success(f"Queued {len(queued)} file(s) for conversion/ingestion.")
     elif stored:
@@ -258,8 +268,13 @@ def _show_import_result(result: object) -> None:
             "No enabled rule matched the filenames, or they were already queued. "
             "Check patterns on the Ingestion rules tab, then re-run import."
         )
+    elif isinstance(scanned_value, Mapping) and local_files == 0 and s3_files == 0:
+        st.warning(_empty_scan_message(backends))
     else:
-        st.info(f"Nothing new stored. Skipped {len(skipped)} file(s).")
+        st.info(
+            f"Nothing new stored. Scanned {local_files} local file(s) and "
+            f"{s3_files} S3 object(s); skipped {len(skipped)}."
+        )
     stored_rows = page_results(stored)
     if stored_rows:
         st.subheader("Stored files")
@@ -300,3 +315,21 @@ def _show_import_result(result: object) -> None:
             use_container_width=True,
             hide_index=True,
         )
+
+
+def _scanned_count(scanned: Mapping[str, object], key: str) -> int:
+    value = scanned.get(key)
+    return value if isinstance(value, int) else 0
+
+
+def _empty_scan_message(backends: Sequence[str]) -> str:
+    sources = " and ".join(backends) if backends else "the configured sources"
+    settings_names = {
+        "local": "INGESTION_LOCAL_ROOT",
+        "s3": "INGESTION_S3_BUCKET/INGESTION_S3_PREFIX",
+    }
+    hints = ", ".join(settings_names[backend] for backend in backends if backend in settings_names)
+    return (
+        f"No files were found in {sources}. "
+        f"Check {hints or 'the ingestion settings'}, then re-run import."
+    )
