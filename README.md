@@ -1060,8 +1060,10 @@ POST /api/v1/rules/2b6fe45a-8a91-4b3b-bcd1-22b96a718232/reject/
 
 All endpoints require authentication and scope configuration reads and writes
 to the authenticated user's records. Configuration changes and review actions
-are recorded in the user audit log. No new package or environment variable is
-required for Feature 022.
+are recorded in the user audit log. The feature is disabled by default; set
+`ENABLE_VALIDATION_RULES=True` to register its models and API routes. Unit-test
+settings enable it so its test modules run; integration settings leave it off.
+No new package is required.
 
 ## Project layout
 

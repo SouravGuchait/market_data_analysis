@@ -94,6 +94,8 @@ jobs:
       - name: Unit tests
         run: |
           .venv/bin/python -m pytest -q \
+            apps/validation_rules/tests/test_api.py \
+            apps/validation_rules/tests/test_validators.py \
             apps/market_data/tests/test_catalogs.py \
             apps/market_data/tests/test_generator_resolution.py \
             apps/market_data/tests/test_models.py \

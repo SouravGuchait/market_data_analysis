@@ -91,6 +91,8 @@ if os.getenv("DEBUG", "True") != "True":
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
 
+ENABLE_VALIDATION_RULES = env_bool("ENABLE_VALIDATION_RULES", default=False)
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
@@ -113,6 +115,9 @@ INSTALLED_APPS = [
     "apps.dashboard",
     "django_zxcvbn_password_validator",
 ]
+
+if ENABLE_VALIDATION_RULES:
+    INSTALLED_APPS.append("apps.validation_rules")
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -281,6 +286,7 @@ REST_FRAMEWORK = {
         "analytics_aggregate": "30/min",
         "dashboard_read": "60/min",
         "market_data_read": "120/min",
+        "validation_rule_api": "60/min",
     },
 }
 
