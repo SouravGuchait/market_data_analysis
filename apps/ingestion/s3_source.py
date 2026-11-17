@@ -11,20 +11,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import boto3
-from botocore.exceptions import BotoCoreError, ClientError
 from django.conf import settings
 
 from .storage import ByteStream, StorageError, StorageUnavailableError
-
-_ERROR_RESPONSES: dict[str, tuple[type[StorageError], str]] = {
-    "AccessDenied": (StorageError, "S3 denied access to the configured location."),
-    "AccessDeniedException": (StorageError, "S3 denied access to the configured location."),
-    "NoSuchBucket": (
-        StorageUnavailableError,
-        "The configured S3 bucket or object does not exist.",
-    ),
-    "NoSuchKey": (StorageUnavailableError, "The configured S3 bucket or object does not exist."),
-}
 
 
 class _BodyStream:
@@ -37,10 +26,7 @@ class _BodyStream:
         self._read = read
 
     def read(self, size: int = -1) -> bytes:
-        try:
-            chunk: object = self._read(size)
-        except (BotoCoreError, ClientError) as exc:
-            raise _s3_error(exc) from exc
+        chunk: object = self._read(size)
         if isinstance(chunk, str):
             return chunk.encode()
         if isinstance(chunk, bytes):
@@ -57,10 +43,8 @@ class RemoteObject:
     size_bytes: int
     modified_at: datetime
 
-
 def _prefix() -> str:
     return str(settings.INGESTION_S3_PREFIX).strip().strip("/")
-
 
 def _bucket() -> str:
     return str(settings.INGESTION_S3_BUCKET).strip()
@@ -72,45 +56,19 @@ def _region() -> str:
 
 def _client() -> object:
     region = _region()
-    if not region:
-        return boto3.client("s3")
     return boto3.client("s3", region_name=region)
-
-
-def _error_code(exc: ClientError) -> str:
-    error = exc.response.get("Error")
-    code = error.get("Code") if isinstance(error, dict) else None
-    return code if isinstance(code, str) and code else "UnknownError"
-
-
-def _s3_error(exc: BotoCoreError | ClientError) -> StorageError:
-    if not isinstance(exc, ClientError):
-        return StorageError("The S3 request could not be completed.")
-    code = _error_code(exc)
-    error_type, message = _ERROR_RESPONSES.get(
-        code,
-        (StorageError, f"The S3 request failed with {code}."),
-    )
-    return error_type(message)
 
 
 def _call(target: object, method_name: str, /, *args: str, **kwargs: str) -> object:
     method = getattr(target, method_name, None)
     if not callable(method):
         raise StorageError("The S3 client does not provide the requested operation.")
-    try:
-        return method(*args, **kwargs)
-    except (BotoCoreError, ClientError) as exc:
-        raise _s3_error(exc) from exc
-
+    result = method(*args, **kwargs)
+    return result if result else {}
 
 def _iter_pages(pages: Iterable[object]) -> Iterator[object]:
     """Yield listing pages, translating failures raised lazily during iteration."""
-
-    try:
-        yield from pages
-    except (BotoCoreError, ClientError) as exc:
-        raise _s3_error(exc) from exc
+    yield from pages
 
 
 def list_remote_objects() -> list[RemoteObject]:
