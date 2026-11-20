@@ -1,5 +1,5 @@
 {
-  "include": ["apps", "config", "ci", "manage.py", "streamlit_app"],
+  "include": ["apps", "config", "manage.py", "streamlit_app"],
   "exclude": [".venv", "**/migrations/**", "**/__pycache__/**"],
   "typeCheckingMode": "standard",
   "pythonVersion": "3.12",

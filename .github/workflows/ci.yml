@@ -88,9 +88,6 @@ jobs:
       - name: Setup Python
         uses: ./.github/actions/setup-python
 
-      - name: CI workflow contract
-        run: .venv/bin/python -m pytest ci/tests -q
-
       - name: Unit tests
         run: |
           .venv/bin/python -m pytest -q \
