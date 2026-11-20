@@ -1,8 +1,9 @@
 """Shared Django settings for every environment.
 
-Environment variables are read once at import time.  Environment-specific
-modules (``development``, ``production``, ``test``) are responsible for
-providing safe defaults or failing fast when a required value is missing.
+Environment variables are read once at import time. ``development`` and
+``production`` load their env file before importing this module, then define
+the database, cache, and Celery broker. This module does not choose those
+connections.
 """
 
 from __future__ import annotations
@@ -73,9 +74,7 @@ def resolve_path(value: str) -> Path:
     return path if path.is_absolute() else BASE_DIR / path
 
 
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "")
-if not SECRET_KEY:
-    raise ImproperlyConfigured("DJANGO_SECRET_KEY must be set")
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
 
 DEBUG = env_bool("DJANGO_DEBUG", default=False)
 
@@ -85,11 +84,6 @@ CSRF_TRUSTED_ORIGINS = env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
 SECURE_BROWSER_XSS_FILTER = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 X_FRAME_OPTIONS = "DENY"
-
-if os.getenv("DEBUG", "True") != "True":
-    SECURE_SSL_REDIRECT = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
 
 ENABLE_VALIDATION_RULES = env_bool("ENABLE_VALIDATION_RULES", default=False)
 
@@ -151,37 +145,6 @@ TEMPLATES = [
 WSGI_APPLICATION = "config.wsgi.application"
 ASGI_APPLICATION = "config.asgi.application"
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.mysql",
-        "NAME": env_str("DB_NAME"),
-        "USER": env_str("DB_USER"),
-        "PASSWORD": env_str("DB_PASSWORD"),
-        "HOST": env_str("DB_HOST"),
-        "PORT": env_str("DB_PORT"),
-        "CONN_MAX_AGE": env_int("DB_CONN_MAX_AGE", 60),
-        "ATOMIC_REQUESTS": False,
-        "OPTIONS": {
-            "charset": "utf8mb4",
-            "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
-            "isolation_level": env_str("DB_ISOLATION_LEVEL", "read committed"),
-        },
-    }
-}
-
-CACHES = {
-    "default": {
-        "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": env_str("CACHE_URL"),
-        "KEY_PREFIX": env_str("CACHE_KEY_PREFIX", "mda"),
-        "TIMEOUT": env_int("CACHE_DEFAULT_TIMEOUT", 300),
-        "OPTIONS": {
-            "socket_connect_timeout": env_int("CACHE_SOCKET_CONNECT_TIMEOUT", 1),
-            "socket_timeout": env_int("CACHE_SOCKET_TIMEOUT", 1),
-        },
-    }
-}
-
 # Feature 015 response-cache TTLs (seconds). Generation counters invalidate early.
 CACHE_TTL_CATALOG = env_int("CACHE_TTL_CATALOG", 3600)
 CACHE_TTL_PORTFOLIO = env_int("CACHE_TTL_PORTFOLIO", 60)
@@ -223,8 +186,6 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 APP_VERSION = env_str("APP_VERSION", "0.1.0")
-INGESTION_LOCAL_ROOT = str(resolve_path(env_str("INGESTION_LOCAL_ROOT", "sample_data")))
-INGESTION_SYSTEM_ROOT = str(resolve_path(env_str("INGESTION_SYSTEM_ROOT", "var/mda-system")))
 INGESTION_SCAN_INTERVAL_SECONDS = max(1, env_int("INGESTION_SCAN_INTERVAL_SECONDS", 60))
 INGESTION_HASH_CHUNK_SIZE_BYTES = max(1, env_int("INGESTION_HASH_CHUNK_SIZE_BYTES", 1024 * 1024))
 INGESTION_MAX_UPLOAD_BYTES = max(1, env_int("INGESTION_MAX_UPLOAD_BYTES", 1024 * 1024 * 1024))
@@ -257,9 +218,6 @@ INGESTION_TASK_TIME_LIMIT_SECONDS = max(
     env_int("INGESTION_TASK_TIME_LIMIT_SECONDS", 2100),
 )
 
-INGESTION_S3_BUCKET = os.getenv("INGESTION_S3_BUCKET", "").strip()
-INGESTION_S3_PREFIX = os.getenv("INGESTION_S3_PREFIX", "").strip()
-INGESTION_S3_REGION = os.getenv("INGESTION_S3_REGION", "").strip()
 API_PREFIX = "api/v1/"
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
@@ -331,8 +289,6 @@ SPECTACULAR_SETTINGS = {
 # Celery
 # ---------------------------------------------------------------------------
 
-CELERY_BROKER_URL = env_str("CELERY_BROKER_URL")
-CELERY_RESULT_BACKEND = env_str("CELERY_RESULT_BACKEND")
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]

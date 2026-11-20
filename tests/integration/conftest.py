@@ -97,6 +97,16 @@ def celery_worker_process(
         "-n",
         f"integ@{uuid.uuid4().hex[:8]}",
     ]
+    # App tests may have published tasks. Drop them before this worker starts
+    # so a ping is not stuck behind ingestion messages from another database.
+    subprocess.run(
+        [sys.executable, "-m", "celery", "-A", "config", "purge", "-f"],
+        cwd=str(ROOT),
+        env=env,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     process = subprocess.Popen(
         command,
         cwd=str(ROOT),

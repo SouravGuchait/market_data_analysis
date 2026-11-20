@@ -57,9 +57,9 @@ services:
   web:
     build:
       context: .
-    command: ["python", "manage.py", "runserver", "0.0.0.0:8000"]
+    command: ["gunicorn", "config.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "3", "--timeout", "60", "--threads", "10", "--access-logfile", "-", "--error-logfile", "-"]
     environment: &django_environment
-      DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:?Set DJANGO_SETTINGS_MODULE in .env}
+      DJANGO_SETTINGS_MODULE: config.settings.development
       DJANGO_DEBUG: ${DJANGO_DEBUG:?Set DJANGO_DEBUG in .env}
       DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in .env}
       # Always allow Compose DNS name `web` for in-network API calls (Streamlit).
@@ -104,8 +104,6 @@ services:
       EMAIL_USE_TLS: ${EMAIL_USE_TLS:-False}
       DEFAULT_FROM_EMAIL: ${DEFAULT_FROM_EMAIL:-noreply@marketanalytics.com}
       FRONTEND_RESET_URL: ${FRONTEND_RESET_URL:-http://localhost:8501}
-    ports:
-      - "${WEB_HOST_PORT:?Set WEB_HOST_PORT in .env}:8000"
     volumes:
       - .:/app
       - mda_logs:/var/log/mda
@@ -173,6 +171,7 @@ services:
         "streamlit_app/app.py",
         "--server.address=0.0.0.0",
         "--server.port=8501",
+        "--server.enableCORS=false",
       ]
     environment:
       # Repo root must be importable so `import streamlit_app` works.
@@ -184,12 +183,24 @@ services:
       MDA_IMPORT_TIMEOUT_SECONDS: ${MDA_IMPORT_TIMEOUT_SECONDS:-600}
       STREAMLIT_REFERENCE_CACHE_TTL: ${STREAMLIT_REFERENCE_CACHE_TTL:-300}
       STREAMLIT_MARKET_CACHE_TTL: ${STREAMLIT_MARKET_CACHE_TTL:-30}
-    ports:
-      - "${STREAMLIT_HOST_PORT:-8501}:8501"
     volumes:
       - .:/app
     depends_on:
       web:
+        condition: service_started
+  nginx:
+    build:
+      context: ./nginx
+    ports:
+      - "${NGINX_HOST_PORT:-8501}:80"
+    environment:
+      DJANGO_UPSTREAM: web:8000
+      STREAMLIT_UPSTREAM: streamlit:8501
+      NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-_}
+    depends_on:
+      web:
+        condition: service_started
+      streamlit:
         condition: service_started
 
 volumes:

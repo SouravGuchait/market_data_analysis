@@ -7,6 +7,8 @@ platform.
 
 This repository implements **Project Foundation**, **Custom User Authentication**, **Database Schema and Model Relationships**, **User Portfolio and Configuration**, the **User Audit Trail**, **Instrument Master Seeding**, **User file ingestion management**, **Universal CSV conversion / Pandas validation**, **Chunk-based Celery processing with batch persistence** (Feature 007), **Candle aggregation with daily returns** (Feature 008), **SMA, EMA, and MACD** (Feature 009), **Bollinger Bands and ATR** (Feature 010), **RSI and Stochastic** (Feature 011), **maximum drawdown** (Feature 020), **built-in ingestion row checks** (Feature 021), and **user-owned validation-rule configurations** (Feature 022). Volume, price-action, and statistical indicators remain future work (Features 012–014).
 
+A first AWS Fargate environment in `eu-north-1` is live: one web task (nginx + Django + Streamlit), one Celery worker task, Redis and RabbitMQ on a private EC2 host reached with SSM, RDS MySQL, and an HTTP Application Load Balancer. Console steps, private-subnet/NAT/SSM notes, and the FEATURE_025 mapping (002 images, 003 task definitions, 005 ALB, 004 services) are in `docs/AWS_CONSOLE_DEPLOYMENT.md`. API layering, analytics and validation-rule contracts, and how a wrapper should attach to those Fargate services are in `docs/GENAI_API_AND_FARGATE_CONTEXT.md`.
+
 ## Implemented features
 
 ### Feature 001: Project Foundation
@@ -26,6 +28,18 @@ This repository implements **Project Foundation**, **Custom User Authentication*
 - Exchange master-data model.
 - Docker Compose for local development with MySQL, Redis, RabbitMQ, web and worker.
 - Unit and integration test structure with pytest and pytest-django.
+
+### AWS Fargate (FEATURE_025, Console)
+
+Verified in account `eu-north-1` (not Express Mode):
+
+- Private subnets + NAT for ECR/CloudWatch; messaging EC2 with SSM (no SSH).
+- Two ECR repositories: `market-data-web` (Django, Streamlit, Celery) and `market-data-nginx`.
+- Task families `market-data-web` (three containers, localhost) and `market-data-celery`.
+- Cluster `market-data-cluster`, desired count 1 each, tasks in private subnets, public IP off.
+- ALB `market-data-alb` → target group IP `:80` → nginx; health `/nginx-health`.
+- Env vars on the task definition (no Secrets Manager). One-off `migrate --noinput` after RDS is Available.
+- Celery Beat is not deployed yet, so timer-based ingestion scans do not run.
 
 ### Custom User Authentication
 
@@ -857,17 +871,17 @@ lookback requirements, and dated `value` observations (`null` until a prior
 valid close exists). Feature 015 caches selected GET responses in Redis with
 generation-counter invalidation; see `docs/ARCHITECTURE.md`.
 
-How to exercise the APIs locally (Docker web on port 8000):
+How to exercise the APIs locally (Docker Nginx proxy on port 8501):
 
 ```bash
 docker compose exec web python manage.py migrate
 
-TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/v1/auth/login/ \
+TOKEN=$(curl -s -X POST http://127.0.0.1:8501/api/v1/auth/login/ \
   -H 'Content-Type: application/json' \
   -d '{"username":"YOUR_USER","password":"YOUR_PASSWORD"}' \
   | python -c 'import sys,json; print(json.load(sys.stdin)["data"]["access"])')
 
-curl -s -X POST http://127.0.0.1:8000/api/v1/analytics/aggregations/ \
+curl -s -X POST http://127.0.0.1:8501/api/v1/analytics/aggregations/ \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -879,10 +893,10 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/analytics/aggregations/ \
   }' | python -m json.tool
 
 # then poll with the returned id:
-# curl -s "http://127.0.0.1:8000/api/v1/analytics/aggregations/<run_id>/" \
+# curl -s "http://127.0.0.1:8501/api/v1/analytics/aggregations/<run_id>/" \
 #   -H "Authorization: Bearer $TOKEN" | python -m json.tool
 
-curl -s "http://127.0.0.1:8000/api/v1/analytics/candles/?instrument_name=Glaxo%20Robotics&exchange_code=XNYS&timeframe=1m" \
+curl -s "http://127.0.0.1:8501/api/v1/analytics/candles/?instrument_name=Glaxo%20Robotics&exchange_code=XNYS&timeframe=1m" \
   -H "Authorization: Bearer $TOKEN" | python -m json.tool
 ```
 
@@ -990,6 +1004,7 @@ Trade-derived candles are not used. Ordinary GETs are not audit events.
 | Method | Endpoint | Purpose |
 | ------ | -------- | ------- |
 | GET | `/api/v1/analytics/drawdown/` | Running drawdown series and period MDD. |
+| GET | `/api/v1/analytics/overview/` | Combined metrics in one payload (`sma`, `returns`, `drawdown` by default). |
 
 Scope filters match daily returns (`instrument_*`, `exchange_*`, `portfolio_id`,
 `start_date`, `end_date`). Each series includes per-date `value` / `peak` and a
@@ -997,6 +1012,7 @@ period-level `maximum_drawdown`.
 
 ```http
 GET /api/v1/analytics/drawdown/?instrument_symbol=ACME&exchange_code=XNYS&start_date=2024-01-01&end_date=2024-12-31
+GET /api/v1/analytics/overview/?instrument_symbol=ACME&exchange_code=XNYS&timeframe=1d&metrics=sma,returns,drawdown
 ```
 
 ### Feature 022: User validation-rule configurations
@@ -1088,11 +1104,12 @@ No new package is required.
 .
 ├── apps/
 │   ├── accounts/          # Custom user model
-│   ├── analytics/         # Candle aggregation, returns, and trend indicators
+│   ├── analytics/         # Candle aggregation, returns, indicators, overview
 │   │   ├── services/      # Aggregation, dispatch, metrics_calculator, trend
 │   │   └── tasks.py       # process_aggregation_run Celery task
 │   ├── audit/             # Append-only user and system audit records
 │   ├── common/            # Health, logging and middleware
+│   ├── dashboard/         # Dashboard APIs
 │   ├── exchanges/         # Exchange master data
 │   ├── ingestion/         # Storage, discovery, converters, staging, built-in row checks
 │   │   ├── converters/    # CSV/JSON/JSONL/XLSX → staging CSV chunks
@@ -1109,8 +1126,15 @@ No new package is required.
 │   ├── urls.py
 │   ├── asgi.py
 │   └── wsgi.py
+├── nginx/                 # Reverse-proxy image used on Fargate
+├── streamlit_app/         # UI; calls Django at MDA_API_BASE_URL
+├── .aws/                  # ECS task definition JSON
+├── docs/
+│   ├── AWS_CONSOLE_DEPLOYMENT.md
+│   └── GENAI_API_AND_FARGATE_CONTEXT.md
 ├── tests/                 # Unit tests and integration tests
 ├── docker-compose.yml
+├── docker-compose.ec2.yml # Redis + RabbitMQ on the messaging EC2
 ├── Dockerfile
 ├── manage.py
 ├── pytest.ini
@@ -1214,15 +1238,68 @@ repository. Run commands from the repository root.
 
 After setup, `dev_up`, `dev_down` and `dev_restart` work from any new WSL Bash
 terminal. They accept optional service names, for example `dev_restart web`.
+`dev_up` always selects `config.settings.development` and `docker-compose.yml`.
 The commands use Docker Compose's `--env-file` option, since Compose does not
 automatically read the `MDA_ENV_FILE` variable used by Django's local settings.
 
-This starts:
+`dev_up` starts the local stack:
 
 - MySQL 8 on `MYSQL_HOST_PORT` (default `3307`; container port `3306`).
 - Redis on `REDIS_HOST_PORT` (default `6379`).
-- Django on `http://localhost:8000`.
+- RabbitMQ for the Celery broker.
+- Nginx on `http://localhost:8501` by default. `/` opens Streamlit; `/api/`,
+  `/admin/`, and `/health` are sent to Django.
 - Celery worker.
+
+The Django and Streamlit ports stay inside the Compose network. To use another
+local proxy port, set `NGINX_HOST_PORT`.
+
+`prod_up`, `prod_down`, and `prod_restart` talk to AWS through
+`scripts/ec2_messaging.sh` and `~/.config/env_vars/prod.env`. Re-run the
+installer after pulling these commands:
+
+```bash
+bash scripts/install_dev_commands.sh "$env_file" "$HOME/.config/env_vars/prod.env"
+source "$HOME/.bashrc"
+```
+
+## Production AWS (Fargate)
+
+The Console deployment that is up in `eu-north-1` uses VPC `vpc-0515051c165f0c76e`.
+
+| Piece | What it is |
+| --- | --- |
+| Public URL | `http://market-data-alb-999829056.eu-north-1.elb.amazonaws.com` (HTTP only; no ACM domain yet) |
+| Web service | `market-data-web` — nginx :80, Gunicorn :8000, Streamlit :8501 in one Fargate task |
+| Worker | `market-data-celery` — same app image, no load balancer |
+| Images | ECR `market-data-web` and `market-data-nginx` |
+| Cache / broker | Redis and RabbitMQ on `i-040a4c35f293b0c03` (`172.31.48.107`), private subnet, SSM not SSH |
+| Database | RDS instance `mda-sourav`. Start it **before** migrate or register. `/api/v1/health/` does not use MySQL, so the UI can look up while sign-up still fails. |
+| Files | S3 `mda-files-bucket` prefix `market-data` |
+
+Tasks run in private subnets with public IP off. NAT `nat-08240cb9d028d5368` is required to pull from ECR. Do not use ECS Express Mode. Do not create a separate nginx service.
+
+`prod_down` scales both ECS services to 0, stops the messaging containers, then stops the EC2 instance and RDS. NAT still bills if it remains. `prod_up` starts RDS (waits until Available), starts the messaging EC2, brings Redis and RabbitMQ up, then sets both ECS services to desired count 1.
+
+Step-by-step Console notes: `docs/AWS_CONSOLE_DEPLOYMENT.md`.
+
+## Production messaging host
+
+Redis and RabbitMQ run on EC2 instance `i-040a4c35f293b0c03` in private subnet
+`subnet-083dfc79c2fb9ebb2`. Set `MDA_EC2_INSTANCE_ID` in
+`~/.config/env_vars/prod.env`. After `scripts/install_dev_commands.sh`, these
+commands use SSM `send-command` from your laptop. They do not open an
+interactive Session Manager shell.
+
+- `prod_up` starts RDS, the messaging EC2 host, Redis and RabbitMQ, then both Fargate services (`market-data-web` and `market-data-celery`). `prod_up --build` also recreates the messaging containers and forces a new ECS deployment of the current task definition. It does not build or push images.
+- `prod_ps` shows Redis and RabbitMQ status on the instance.
+- `prod_restart` ensures RDS and EC2 are up, recreates the messaging containers, and forces a new ECS deployment at desired count 1.
+- `prod_down` sets both ECS services to 0, stops the messaging containers, then stops the EC2 instance and RDS.
+- `prod_stop` stops only the EC2 instance. Docker volumes on the disk remain. `prod_start` starts only that instance and waits until SSM is online.
+- `dev_up` is unchanged and still uses local Compose.
+
+The NAT gateway still incurs an hourly charge while it exists, even if the
+instance is stopped.
 
 Docker Compose reads variables from the configured env file and substitutes
 `${VARIABLE}` expressions in `docker-compose.yml`. The Compose-specific values
@@ -1232,7 +1309,7 @@ host. MySQL uses the non-root `DB_USER` account for Django, with
 `DB_ROOT_PASSWORD` reserved for the database administrator.
 
 Compose requires the database credentials, Django secret and allowed hosts,
-`MYSQL_HOST_PORT`, `REDIS_HOST_PORT`, `REDIS_IMAGE`, `WEB_HOST_PORT`, `COMPOSE_DB_HOST`,
+`MYSQL_HOST_PORT`, `REDIS_HOST_PORT`, `REDIS_IMAGE`, `COMPOSE_DB_HOST`,
 `COMPOSE_DB_PORT`, `COMPOSE_CACHE_URL`, `COMPOSE_CELERY_BROKER_URL`,
 `COMPOSE_CELERY_RESULT_BACKEND`, and the Compose ingestion
 path. The web and worker containers write logs to `/var/log/mda/app.log`
@@ -1376,8 +1453,29 @@ Optional ingestion settings:
 - `INGESTION_S3_BUCKET`, `INGESTION_S3_PREFIX`, `INGESTION_S3_REGION` — S3 location read by the import call. Leave the bucket empty when S3 is not used. `INGESTION_S3_PREFIX` must match the object keys exactly (`market-data` for `s3://bucket/market-data/...`); an empty `scanned.s3` in the import response means the prefix matched no objects. Docker injects these values when a container is created, so recreate the `web` and `worker` services after editing `.env` (`docker compose up -d --force-recreate web worker`) rather than restarting them.
 - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` — credentials read by the AWS SDK. These are not API fields.
 
-Production additionally requires `DJANGO_SETTINGS_MODULE=config.settings.production`
-and rejects the development secret key and an empty host list.
+`dev_up` forces `DJANGO_SETTINGS_MODULE=config.settings.development`.
+Fargate tasks use `config.settings.production`; `prod_up` does not start a local production Compose stack. Development settings load the
+project `.env` before the shared module. Production settings load
+`MDA_PROD_ENV_FILE` when that variable is set (the installer exports it from
+`~/.config/env_vars/prod.env`). Existing process environment values win. If the
+variable is unset, or the file is missing, dotenv loading is skipped, which is
+how Compose `env_file` and the CI image probe start. Production requires `DJANGO_SECRET_KEY`, database settings, `LOG_FILE_PATH`,
+`DJANGO_ALLOWED_HOSTS`, `DJANGO_CSRF_TRUSTED_ORIGINS`, `CACHE_URL`, and
+`CELERY_BROKER_URL`. Set `INGESTION_S3_BUCKET`, `INGESTION_S3_PREFIX`,
+and `INGESTION_S3_REGION` when S3 import is used. Set `ENABLE_VALIDATION_RULES=true`
+on the Django (and Celery) task if `/api/v1/rules/` must be served. Secure cookies and HSTS stay
+off until `DJANGO_SESSION_COOKIE_SECURE`, `DJANGO_CSRF_COOKIE_SECURE`, and
+`DJANGO_SECURE_HSTS_SECONDS` are turned on for HTTPS.
+
+## LinkedIn lines
+
+Keep these non-technical. Do not paste passwords, account IDs, or a URL you want to keep private.
+
+- Shipped a live market-data analytics workspace this week: one public address for the UI, with the database, cache, and background workers on a private network.
+- The hard part was not a new library. It was order: private subnets and NAT, images in a registry, a web task that is really three processes behind one proxy, a worker with no public IP, then start the database before anyone can register.
+- HTTP on the AWS load balancer on purpose for this first cut. HTTPS on a real domain is next; so is turning the environment off cleanly when nobody is using it.
+
+Longer drafts sit at the end of `docs/AWS_CONSOLE_DEPLOYMENT.md`.
 
 ## Database notes
 
@@ -1398,15 +1496,16 @@ python -m pytest -q
 ```
 
 Integration tests use real MySQL, Redis, and RabbitMQ via
-`config.settings.integration`. Start Compose `db`, `redis`, and `rabbitmq`
-(or equivalent services), then:
+`config.settings.integration`. Start Compose `db`, `redis`, and `rabbitmq`.
+The settings read `~/.config/env_vars/dev.env` and connect to MySQL on
+`MYSQL_HOST_PORT` (3307 in the sample), not the container port 3306. Then:
 
 ```bash
 export RUN_INTEGRATION=1
 # Host/port/cache/broker can come from your shell/.env.
 # Integration settings force DB_NAME=mda_integration and prefer root
 # (DB_ROOT_PASSWORD or DB_USER=root) so pytest-django can CREATE DATABASE.
-python -m pytest -m integration --ds=config.settings.integration tests/integration
+python3 -m pytest --override-ini="addopts=-ra" --ds=config.settings.integration apps tests/integration
 ```
 
 With Compose MySQL on the published host port (example `3307`):
@@ -1417,11 +1516,12 @@ export RUN_INTEGRATION=1
 export DB_HOST=127.0.0.1 DB_PORT="$MYSQL_HOST_PORT"
 export CACHE_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/15"
 export CELERY_BROKER_URL="amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@127.0.0.1:${RABBITMQ_HOST_PORT}//"
-python -m pytest -m integration --ds=config.settings.integration tests/integration
+python -m pytest --override-ini="addopts=-ra" --ds=config.settings.integration apps tests/integration
 ```
 
-The GitHub Actions `integration` job runs the same suite with service
-containers and a live Celery worker (started by the test fixtures).
+That command runs the app feature tests and `tests/integration` on MySQL and Redis, and publishes Celery work to RabbitMQ. The worker fixture purges the queue, then consumes tasks for the broker checks.
+
+The GitHub Actions `integration` job runs the same command with service containers.
 
 Static checks:
 
