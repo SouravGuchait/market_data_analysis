@@ -203,7 +203,7 @@ jobs:
   integration:
     name: integration
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     services:
       mysql:
         image: mysql:8.0
@@ -257,6 +257,7 @@ jobs:
       CELERY_BROKER_URL: amqp://mda_app:mda_app@127.0.0.1:5672//
       CELERY_RESULT_BACKEND: rpc://
       LOG_FILE_ENABLED: "False"
+      ENABLE_VALIDATION_RULES: "True"
       INGESTION_LOCAL_ROOT: data/integration-ingestion
       INGESTION_SYSTEM_ROOT: data/integration-system
     steps:
@@ -269,9 +270,12 @@ jobs:
       - name: Integration tests
         run: |
           set -euo pipefail
+          # App feature tests and the broker/worker checks share MySQL, Redis,
+          # and RabbitMQ. Override the default "not integration" marker.
           .venv/bin/python -m pytest -q \
-            -m integration \
+            --override-ini="addopts=-ra" \
             --ds=config.settings.integration \
+            apps \
             tests/integration
 
   docker:
@@ -288,6 +292,7 @@ jobs:
           DJANGO_SECRET_KEY: ci-only-not-a-production-secret
           DJANGO_DEBUG: "false"
           DJANGO_ALLOWED_HOSTS: 127.0.0.1,localhost
+          DJANGO_CSRF_TRUSTED_ORIGINS: http://127.0.0.1:8000
           DJANGO_SECURE_SSL_REDIRECT: "false"
           DB_NAME: ci
           DB_USER: ci
@@ -328,6 +333,7 @@ jobs:
             --env DJANGO_SECRET_KEY \
             --env DJANGO_DEBUG \
             --env DJANGO_ALLOWED_HOSTS \
+            --env DJANGO_CSRF_TRUSTED_ORIGINS \
             --env DJANGO_SECURE_SSL_REDIRECT \
             --env DB_NAME \
             --env DB_USER \

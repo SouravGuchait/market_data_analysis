@@ -1,0 +1,50 @@
+# Redis and RabbitMQ on the messaging EC2 host only.
+# Do not use this file with local docker-compose.yml.
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - sh
+      - -c
+      - exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+      RABBITMQ_DEFAULT_VHOST: mda
+    ports:
+      - "5672:5672"
+      - "127.0.0.1:15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test:
+        - CMD
+        - rabbitmq-diagnostics
+        - -q
+        - ping
+      interval: 15s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  redis_data:
+  rabbitmq_data:

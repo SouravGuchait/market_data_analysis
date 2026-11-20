@@ -11,22 +11,11 @@ import os
 
 os.environ.setdefault("DJANGO_SECRET_KEY", "test-secret-key")
 os.environ.setdefault("DJANGO_ALLOWED_HOSTS", "testserver,localhost,127.0.0.1")
-os.environ.setdefault("DB_NAME", "test")
-os.environ.setdefault("DB_USER", "test")
-os.environ.setdefault("DB_PASSWORD", "test")
-os.environ.setdefault("DB_HOST", "127.0.0.1")
-os.environ.setdefault("DB_PORT", "3306")
-os.environ.setdefault("CACHE_URL", "redis://127.0.0.1:6379/15")
-os.environ.setdefault("CELERY_BROKER_URL", "memory://")
-os.environ.setdefault("CELERY_RESULT_BACKEND", "cache+memory://")
-os.environ["CELERY_BROKER_URL"] = "memory://"
-os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
 os.environ["LOG_FILE_ENABLED"] = "False"
-os.environ.setdefault("INGESTION_LOCAL_ROOT", "data/test-ingestion")
-os.environ.setdefault("INGESTION_SYSTEM_ROOT", "data/test-system")
 os.environ["ENABLE_VALIDATION_RULES"] = "True"
 
 from .base import *  # noqa: E402,F403
+from .base import resolve_path  # noqa: E402
 
 DEBUG = False
 
@@ -44,6 +33,12 @@ CACHES = {
         "LOCATION": "mda-test",
     }
 }
+
+INGESTION_LOCAL_ROOT = str(resolve_path("data/test-ingestion"))
+INGESTION_SYSTEM_ROOT = str(resolve_path("data/test-system"))
+INGESTION_S3_BUCKET = ""
+INGESTION_S3_PREFIX = ""
+INGESTION_S3_REGION = ""
 
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True

@@ -1,0 +1,96 @@
+x-django: &django
+  build:
+    context: .
+  env_file:
+    - ${MDA_PROD_ENV_FILE:?Set MDA_PROD_ENV_FILE}
+  restart: unless-stopped
+  environment: &django_environment
+    DJANGO_SETTINGS_MODULE: config.settings.production
+    DJANGO_DEBUG: "false"
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:?Set DJANGO_ALLOWED_HOSTS in prod.env},web
+    DB_HOST: ${DB_HOST:?Set DB_HOST in prod.env}
+    DB_PORT: ${DB_PORT:?Set DB_PORT in prod.env}
+    LOG_FILE_PATH: /var/log/mda/app.log
+    INGESTION_LOCAL_ROOT: /data/ingestion
+    INGESTION_SYSTEM_ROOT: /var/lib/mda/system
+  volumes:
+    - prod_logs:/var/log/mda
+    - prod_ingestion:/data/ingestion
+    - prod_system:/var/lib/mda/system
+
+services:
+  web:
+    <<: *django
+    command:
+      [
+        "gunicorn",
+        "config.wsgi:application",
+        "--bind",
+        "0.0.0.0:8000",
+        "--workers",
+        "3",
+        "--timeout",
+        "60",
+        "--threads",
+        "10",
+        "--access-logfile",
+        "-",
+        "--error-logfile",
+        "-",
+      ]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  migrate:
+    <<: *django
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    restart: "no"
+
+  streamlit:
+    build:
+      context: .
+    restart: unless-stopped
+    command:
+      [
+        "streamlit",
+        "run",
+        "streamlit_app/app.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+        "--server.headless=true",
+        "--server.enableCORS=false",
+      ]
+    env_file:
+      - ${MDA_PROD_ENV_FILE:?Set MDA_PROD_ENV_FILE}
+    environment:
+      PYTHONPATH: /app
+      MDA_API_BASE_URL: http://web:8000
+      MDA_API_TIMEOUT_SECONDS: ${MDA_API_TIMEOUT_SECONDS:-30}
+      MDA_IMPORT_TIMEOUT_SECONDS: ${MDA_IMPORT_TIMEOUT_SECONDS:-600}
+      STREAMLIT_REFERENCE_CACHE_TTL: ${STREAMLIT_REFERENCE_CACHE_TTL:-300}
+      STREAMLIT_MARKET_CACHE_TTL: ${STREAMLIT_MARKET_CACHE_TTL:-30}
+    depends_on:
+      web:
+        condition: service_started
+
+  nginx:
+    build:
+      context: ./nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_HOST_PORT:-80}:80"
+    environment:
+      DJANGO_UPSTREAM: web:8000
+      STREAMLIT_UPSTREAM: streamlit:8501
+      NGINX_SERVER_NAME: ${NGINX_SERVER_NAME:-_}
+    depends_on:
+      web:
+        condition: service_started
+      streamlit:
+        condition: service_started
+
+volumes:
+  prod_logs:
+  prod_ingestion:
+  prod_system:
